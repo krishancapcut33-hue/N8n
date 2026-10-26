@@ -6,12 +6,14 @@ import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import { mock } from 'vitest-mock-extended';
 import type { InstanceSettings } from 'n8n-core';
 
+import type { OtelConfigureHook } from '../otel-configure-hook';
 import { OtelExporterFactory } from '../otel-exporter.factory';
 import type { OtelConnectionParams, OtelSettingsService } from '../otel-settings.service';
 import type { OtelConfig } from '../otel.config';
 import { ATTR, OTEL_TEST_SPAN_NAME } from '../otel.constants';
 import { OtelService } from '../otel.service';
 
+import type { ExternalHooks } from '@/external-hooks';
 import type { OtelSdk } from '@/observability/otel-sdk';
 import { TRACING_OFF } from '@/observability/swappable-pipeline';
 import type { Publisher } from '@/scaling/pubsub/publisher.service';
@@ -198,6 +200,8 @@ describe('OtelService', () => {
 			sdk,
 			moduleRegistry,
 			publisher,
+			mock<ExternalHooks>(),
+			mock<OtelConfigureHook>(),
 		);
 
 	beforeEach(() => {
