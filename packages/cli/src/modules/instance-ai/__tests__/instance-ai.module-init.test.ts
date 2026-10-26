@@ -1,4 +1,4 @@
-import { Logger } from '@n8n/backend-common';
+import { Logger, ModuleRegistry } from '@n8n/backend-common';
 import { WorkflowMutationHooksProxy } from '@n8n/backend-services';
 import { mockInstance } from '@n8n/backend-test-utils';
 import { InstanceAiConfig } from '@n8n/config';
@@ -7,6 +7,7 @@ import { InstanceSettings } from 'n8n-core';
 import { createDeferredPromise } from '@n8n/utils/promise/deferred-promise';
 
 import { InstanceCredentialBroker } from '@/credentials/instance-credential-broker';
+import { License } from '@/license';
 import { SandboxSettingsService } from '@/services/sandbox-settings.service';
 
 import { InboxSourceRegistry } from '../../inbox/inbox-source.registry';
@@ -38,6 +39,7 @@ const {
 vi.mock('@/credentials/instance-credential-broker', () => ({
 	InstanceCredentialBroker: vi.fn(),
 }));
+vi.mock('@/license', () => ({ License: vi.fn() }));
 vi.mock('@/services/sandbox-settings.service', () => ({
 	SandboxSettingsService: vi.fn(),
 }));
@@ -104,6 +106,8 @@ describe('InstanceAiModule.init', () => {
 		mockInstance(InstanceCredentialBroker);
 		mockInstance(SandboxSettingsService);
 		const settings = mockInstance(InstanceAiSettingsService);
+		const license = mockInstance(License);
+		const moduleRegistry = mockInstance(ModuleRegistry);
 		mockInstance(InstanceAiSetupTelemetryService);
 		mockInstance(InstanceAiEventRelay);
 		const runtime = mockInstance(InstanceAiService);
@@ -125,6 +129,8 @@ describe('InstanceAiModule.init', () => {
 			instanceSettings,
 			settings,
 			runtime,
+			license,
+			moduleRegistry,
 		};
 	}
 
@@ -243,6 +249,41 @@ describe('InstanceAiModule.init', () => {
 			}),
 		);
 		expect(investigations.reconcile).not.toHaveBeenCalled();
+	});
+
+	it('re-checks the Assistant default on a license change, then refreshes its settings', async () => {
+		const { settings, license, moduleRegistry } = setup();
+		const recheck = createDeferredPromise();
+		settings.keepEnabledIfInUse.mockReturnValue(recheck.promise);
+
+		await new InstanceAiModule().init();
+		const [[onLicenseChange]] = license.onCertRefresh.mock.calls;
+		onLicenseChange('cert');
+
+		expect(settings.keepEnabledIfInUse).toHaveBeenCalledOnce();
+		expect(moduleRegistry.refreshModuleSettings).not.toHaveBeenCalled();
+		recheck.resolve();
+		await vi.waitFor(() =>
+			expect(moduleRegistry.refreshModuleSettings).toHaveBeenCalledWith('instance-ai'),
+		);
+	});
+
+	it('refreshes the settings and logs a failed re-check after a license change', async () => {
+		const { settings, license, moduleRegistry, logger } = setup();
+		const error = new Error('Settings write failed.');
+		settings.keepEnabledIfInUse.mockRejectedValue(error);
+
+		await new InstanceAiModule().init();
+		const [[onLicenseChange]] = license.onCertRefresh.mock.calls;
+		onLicenseChange('cert');
+
+		await vi.waitFor(() =>
+			expect(logger.error).toHaveBeenCalledWith(
+				'Failed to apply a license change to the n8n Assistant',
+				{ error },
+			),
+		);
+		expect(moduleRegistry.refreshModuleSettings).toHaveBeenCalledWith('instance-ai');
 	});
 
 	afterEach(() => {
