@@ -17,10 +17,8 @@ import { useI18n } from '@n8n/i18n';
 import { useRBACStore } from '@n8n/stores/rbac.store';
 import { useRootStore } from '@n8n/stores/useRootStore';
 import { computed, nextTick, ref, toRef, watch } from 'vue';
-import { I18nT } from 'vue-i18n';
 import { useRoute, useRouter } from 'vue-router';
 
-import TimeAgo from '@/app/components/TimeAgo.vue';
 import { VIEWS } from '@/app/constants';
 import { useDocumentTitle } from '@/app/composables/useDocumentTitle';
 import { useProjectsStore } from '@/features/collaboration/projects/projects.store';
@@ -47,6 +45,7 @@ import {
 } from '../promotionOperation';
 import {
 	includedChangeCount,
+	resolveInclusion,
 	totalChangeCount,
 	type ResourceKey,
 } from '../promotionPreview.selection';
@@ -66,17 +65,8 @@ const documentTitle = useDocumentTitle();
 const projectId = toRef(props, 'projectId');
 const direction = toRef(props, 'direction');
 
-const {
-	state,
-	preview,
-	check,
-	graph,
-	repositoryName,
-	refreshing,
-	refreshFailed,
-	lastRefreshedAt,
-	refresh,
-} = usePromotionPreview(projectId, direction);
+const { state, preview, check, graph, environment, refreshing, refreshFailed, refresh } =
+	usePromotionPreview(projectId, direction);
 // The page shows and enforces only the blockers of the workflows it lists.
 const scopedCheck = computed(() =>
 	check.value && graph.value ? scopeCheck(check.value, graph.value) : null,
@@ -109,7 +99,24 @@ const details = usePromotionResourceDetails(
 	activeWorkflowKey,
 );
 
-const title = computed(() => i18n.baseText(`promotions.preview.title.${props.direction}`));
+const projectName = computed(() =>
+	projectsStore.currentProject?.id === props.projectId
+		? projectsStore.currentProject.name
+		: preview.value?.resources.find(
+				(resource) => resource.type === 'project' && resource.id === props.projectId,
+			)?.name,
+);
+const title = computed(() => {
+	if (!environment.value?.name) {
+		return i18n.baseText(`promotions.preview.title.${props.direction}`);
+	}
+	return i18n.baseText(
+		projectName.value
+			? `promotions.preview.title.project.${props.direction}`
+			: `settings.promotions.${props.direction}.dialog.title`,
+		{ interpolate: { project: projectName.value ?? '', environment: environment.value.name } },
+	);
+});
 watch(title, (value) => documentTitle.set(value), { immediate: true });
 
 const tree = computed(() =>
@@ -200,6 +207,13 @@ const submitBlockedReason = computed(() => {
 	}
 	return hasSelectedBlocked.value ? i18n.baseText('promotions.preview.submit.blocked') : undefined;
 });
+const actionableChanges = computed(() => {
+	if (!graph.value || folderConflicts.value.length > 0) return 0;
+	const actionable = new Set(
+		[...selection.selected.value].filter((key) => !blockers.value.blocked.has(key)),
+	);
+	return includedChangeCount(graph.value, resolveInclusion(graph.value, actionable));
+});
 const canSubmit = computed(
 	() =>
 		state.value === 'ready' &&
@@ -207,17 +221,15 @@ const canSubmit = computed(
 		!operation.isBusy.value &&
 		!submitBlockedReason.value &&
 		request.value.workflowIds.length > 0 &&
+		actionableChanges.value > 0 &&
 		(props.direction === 'promote' || !!check.value),
 );
-const submitLabel = computed(() => {
-	if (props.direction === 'apply' && request.value.confirmDestructiveChanges) {
-		return i18n.baseText('promotions.bindings.applyDataTableChanges');
-	}
-	return i18n.baseText(`promotions.preview.submit.${props.direction}`, {
-		adjustToNumber: includedChanges.value,
-		interpolate: { count: String(includedChanges.value) },
-	});
-});
+const submitLabel = computed(() =>
+	i18n.baseText(`promotions.preview.submit.${props.direction}`, {
+		adjustToNumber: actionableChanges.value,
+		interpolate: { count: String(actionableChanges.value) },
+	}),
+);
 
 type PreviewTab = 'changes' | 'blockers';
 const activeTab = ref<PreviewTab>('changes');
@@ -232,7 +244,7 @@ const tabs = computed(() => [
 	{
 		value: 'changes' as const,
 		label: i18n.baseText('promotions.preview.tab.changes'),
-		tag: String(totalChanges.value),
+		tag: graph.value ? String(totalChanges.value) : undefined,
 	},
 	...(showBlockersTab.value
 		? [
@@ -263,7 +275,7 @@ const treeResizer = useResizablePanel({
 	container: panes,
 	width: {
 		localStorageKey: 'N8N_PROMOTION_PREVIEW_TREE_WIDTH',
-		defaultSize: (size) => Math.min(Math.max(size * 0.28, 280), 420),
+		defaultSize: (size) => Math.min(Math.max(size * 0.24, 240), 340),
 		minSize: 240,
 		maxSize: (size) => Math.min(size * 0.5, 640),
 		snap: true,
@@ -285,26 +297,7 @@ const treeResizer = useResizablePanel({
 					:class="$style.tabs"
 					data-test-id="promotion-preview-tabs"
 				/>
-				<div :class="$style.meta">
-					<div :class="$style.details">
-						<N8nText v-if="preview && repositoryName" step="xs" color="text-light">
-							{{ repositoryName }}
-						</N8nText>
-						<N8nText v-if="preview" step="xs" color="text-light">
-							{{
-								i18n.baseText(`promotions.preview.branch.${direction}`, {
-									interpolate: { branch: preview.source.branchName },
-								})
-							}}
-						</N8nText>
-						<N8nText v-if="lastRefreshedAt" step="xs" color="text-light">
-							<I18nT keypath="promotions.preview.lastRefreshed" scope="global">
-								<template #time>
-									<TimeAgo :date="lastRefreshedAt.toISOString()" live />
-								</template>
-							</I18nT>
-						</N8nText>
-					</div>
+				<div :class="$style.actions">
 					<N8nButton
 						variant="outline"
 						size="small"
@@ -412,7 +405,6 @@ const treeResizer = useResizablePanel({
 						:inspected-key="inspectedKey"
 						:disabled="blockers.blocked"
 						:locked="operation.isBusy.value"
-						:direction="direction"
 						:blockers="blockers"
 						@show-blockers="activeTab = 'blockers'"
 						@toggle="selection.toggle"
@@ -517,13 +509,8 @@ const treeResizer = useResizablePanel({
 }
 
 .tabRow {
-	/* N8nTabs draws its active indicator this far below its own box. Reserving the space puts the
-	   indicator on the divider, as in the inbox. No token matches this value. */
-	--promotion-preview--tab-overhang: 14px;
-
 	display: flex;
 	align-items: flex-end;
-	padding-bottom: var(--promotion-preview--tab-overhang);
 	justify-content: space-between;
 	gap: var(--spacing--sm);
 	width: 100%;
@@ -535,26 +522,12 @@ const treeResizer = useResizablePanel({
 	min-width: 0;
 }
 
-.meta {
+.actions {
 	flex-shrink: 0;
-	/* Centers the group on the tab label, which sits half the overhang below the tab box. */
-	margin-bottom: calc(var(--promotion-preview--tab-overhang) / -2);
+	align-self: center;
 	display: flex;
-	flex-wrap: wrap;
 	align-items: center;
-	gap: var(--spacing--sm);
-}
-
-.details {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: center;
-	column-gap: var(--spacing--2xs);
-}
-
-.details > * + *::before {
-	content: '·' / '';
-	margin-right: var(--spacing--2xs);
+	gap: var(--spacing--2xs);
 }
 
 .state {
