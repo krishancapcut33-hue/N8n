@@ -80,6 +80,7 @@ export type {
 	ExecutionLocation,
 	ExternalDependencies,
 	IStepExecutor,
+	ChildDeclaration,
 	StepExecutionContext,
 	StepExecutionRequest,
 	StepExecutionResult,
@@ -104,6 +105,10 @@ export type {
 export { ExecutionNotFoundError, StepNotFoundError } from './execution';
 export type {
 	CallerContext,
+	ChildOutcome,
+	ChildResult,
+	ChildResumeCause,
+	ChildStarter,
 	ExecutionMode,
 	ExecutionViewStore,
 	ExecutionRecord,
