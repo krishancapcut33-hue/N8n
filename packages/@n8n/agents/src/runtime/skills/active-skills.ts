@@ -47,7 +47,21 @@ export class ActiveSkills {
 		private readonly store?: RuntimeSkillStateStore,
 	) {}
 
-	async restore(list: AgentMessageList, persistence?: AgentPersistenceOptions): Promise<void> {
+	/**
+	 * Restore the active skills for a run. A fresh run starts a new user turn, so
+	 * skills with a `turn` lifetime can expire: their recorded loads collapse to
+	 * `active: false`, and the model loads them again when it needs them.
+	 *
+	 * Collapsing a load rewrites every cached message after it, so a turn skill
+	 * expires only when that rewrite is free: the prompt cache has gone cold
+	 * (`cacheTtlMs` since the last message), or observational memory masked its
+	 * recorded load. A warm follow-up or a resumed run keeps the skill.
+	 */
+	async restore(
+		list: AgentMessageList,
+		persistence?: AgentPersistenceOptions,
+		options: { freshRun?: boolean; cacheTtlMs?: number; now?: Date } = {},
+	): Promise<void> {
 		this.loaded.clear();
 		this.list = list;
 		this.scope = persistence
@@ -66,7 +80,10 @@ export class ActiveSkills {
 				...this.recordedLoads(list).values(),
 				...this.stampedActivations(list).map(([, skillId]) => skillId),
 			];
-		const registered = new Set(this.source.registry.skills.map(({ id }) => id));
+		const expired = options.freshRun ? this.expiredTurnSkills(list, options) : new Set<string>();
+		const registered = new Set(
+			this.source.registry.skills.filter(({ id }) => !expired.has(id)).map(({ id }) => id),
+		);
 		const retainedIds = new Set<string>();
 		for (const id of new Set(ids)) {
 			const skill = registered.has(id) ? await this.source.loadSkill(id) : null;
@@ -79,6 +96,40 @@ export class ActiveSkills {
 			new Set(stored).size === retainedIds.size &&
 			stored.every((id) => retainedIds.has(id));
 		if (!storeIsCurrent && (ids.length > 0 || stored !== undefined)) await this.persist();
+	}
+
+	/** Turn-lifetime skills whose expiry costs no extra cache write on this run. */
+	private expiredTurnSkills(
+		list: AgentMessageList,
+		options: { cacheTtlMs?: number; now?: Date },
+	): Set<string> {
+		const turnSkills = this.source.registry.skills
+			.filter((entry) => entry.policy?.lifetime === 'turn')
+			.map(({ id }) => id);
+		if (turnSkills.length === 0) return new Set();
+
+		const input = new Set(list.inputDelta());
+		const lastActivity = Math.max(
+			0,
+			...list
+				.messages()
+				.filter((message) => !input.has(message))
+				.map((message) => message.createdAt.getTime()),
+		);
+		const now = (options.now ?? new Date()).getTime();
+		const cacheIsCold = options.cacheTtlMs === undefined || now - lastActivity > options.cacheTtlMs;
+		if (cacheIsCold) return new Set(turnSkills);
+
+		// On a warm cache, expire only a skill whose recorded load observation masked:
+		// that rewrite already happened. A skill without any record already rides in
+		// the system block, so dropping it would rewrite the warm prefix.
+		const deliverable = this.deliverableToolResults();
+		const records = [...this.recordedLoads(list), ...this.stampedActivations(list)];
+		const recorded = new Set(records.map(([, skillId]) => skillId));
+		const anchored = new Set(
+			records.filter(([toolCallId]) => deliverable.has(toolCallId)).map(([, skillId]) => skillId),
+		);
+		return new Set(turnSkills.filter((id) => recorded.has(id) && !anchored.has(id)));
 	}
 
 	async load(
