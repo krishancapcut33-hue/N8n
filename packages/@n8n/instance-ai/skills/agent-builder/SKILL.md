@@ -491,22 +491,13 @@ Verify:
 
 ## Memory
 
-Fresh Agents must include this default memory config unless the user
-explicitly asks to disable or change memory:
-
-```json
-{
-  "enabled": true,
-  "storage": "n8n",
-  "observationalMemory": {
-    "enabled": true
-  }
-}
-```
-
-This is the Agent's session memory. The `observationalMemory` settings tune
-that memory. They are not a separate user-facing memory product. Preserve
-existing memory tuning unless the user asked to change it.
+The server gives a fresh Agent n8n session memory (`memory.enabled`, storage
+`n8n`, `observationalMemory.enabled`) when your first config write omits
+`memory`. Do not write it yourself unless the user asks to disable or change
+memory. A starter draft already has instructions, so the server does not treat
+it as fresh: when the draft has no `memory`, include
+`{ "enabled": true, "storage": "n8n", "observationalMemory": { "enabled": true } }`
+in your first config write. Preserve existing memory tuning unless the user asked to change it.
 
 Load `agent-builder-memory` for Episodic, long-term, or cross-session memory,
 worker models, threshold or budget tuning, or to disable memory. Do not load it
@@ -514,9 +505,8 @@ for ordinary fresh-Agent creation.
 
 Verify:
 
-- A fresh Agent has enabled n8n memory, unless the user disabled it.
-- A fresh Agent sets `observationalMemory.enabled` to `true`, unless the user
-  disabled it.
+- A starter draft without `memory` got the default memory in your first config
+  write, unless the user disabled memory.
 
 ## Tools
 

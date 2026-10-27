@@ -470,7 +470,8 @@ describe('Instance AI skills', () => {
 			'never stop before the first\n`workflow_builder_build_workflow` call',
 		);
 		expect(loaded?.instructions).toContain('inspect it first via `debugging-executions`');
-		expect(loaded?.instructions).toContain('SDK node `output` mocks are raw `$json` objects');
+		// The sandbox runs the published workflow-sdk, which does not yet warn about MOCK_OUTPUT_JSON_ENVELOPE.
+		expect(loaded?.instructions).toContain('mock `output` items are raw `$json` objects');
 		expect(loaded?.instructions).toMatch(/inline setup card in the n8n\s+Assistant panel/);
 		expect(loaded?.instructions).toContain(
 			'never ask for\nsetup values before the first successful build',
@@ -480,7 +481,7 @@ describe('Instance AI skills', () => {
 		expect(loaded?.instructions).toContain(
 			'Do NOT wire branches as standalone statements after `export default`',
 		);
-		expect(loaded?.instructions).toContain('never reaches the builder');
+		expect(loaded?.instructions).toContain('calls never reach the builder');
 	});
 
 	it('loads the bundled one-off-operations skill', async () => {
