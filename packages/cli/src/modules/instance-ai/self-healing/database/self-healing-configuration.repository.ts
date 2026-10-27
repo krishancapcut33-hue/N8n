@@ -3,10 +3,10 @@ import {
 	BaseRepository,
 	isUniqueConstraintError,
 	parseDbTime,
+	Person,
 	ProjectRelation,
 	SharedWorkflow,
 	TransactionRunner,
-	User,
 	WorkflowEntity,
 	type OperationContext,
 } from '@n8n/db';
@@ -226,8 +226,9 @@ export class SelfHealingConfigurationRepository extends BaseRepository<SelfHeali
 	) {
 		if (userIds?.length === 0) return [];
 
+		// Reviewers are chosen by name and review in their inbox, so they are people.
 		const query = this.manager
-			.createQueryBuilder(User, 'user')
+			.createQueryBuilder(Person, 'user')
 			.innerJoin(ProjectRelation, 'projectMember', 'projectMember.userId = user.id')
 			.select(['user.id', 'user.email', 'user.firstName', 'user.lastName'])
 			.where('projectMember.projectId = :projectId', { projectId })
