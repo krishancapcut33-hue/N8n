@@ -7,6 +7,7 @@ type MockAgentInstance = {
 	configuration: Mock;
 	telemetry: Mock;
 	modelFetch: Mock;
+	functionId: Mock;
 };
 
 const mockAgentInstances: MockAgentInstance[] = [];
@@ -19,6 +20,7 @@ vi.mock('@n8n/agents', () => ({
 		this.configuration = vi.fn().mockReturnThis();
 		this.telemetry = vi.fn().mockReturnThis();
 		this.modelFetch = vi.fn().mockReturnThis();
+		this.functionId = vi.fn().mockReturnThis();
 		mockAgentInstances.push(this);
 	}),
 	Tool: vi.fn(),
@@ -56,6 +58,7 @@ const MODEL_ENV_KEYS = [
 	'N8N_INSTANCE_AI_EVAL_JUDGE_MODEL',
 	'N8N_INSTANCE_AI_EVAL_JUDGE_EFFORT',
 	'N8N_INSTANCE_AI_EVAL_USAGE_LOG',
+	'N8N_INSTANCE_AI_MODEL_REQUEST_LABELS',
 ];
 
 function resetModelEnv(): void {
@@ -142,10 +145,32 @@ describe('eval agent model config', () => {
 
 		expect(mockAgentInstances[0]?.model).toHaveBeenCalledWith(fallbackModelConfig);
 		expect(mockAgentInstances[0]?.modelFetch).toHaveBeenCalledWith(modelFetch);
+		expect(mockAgentInstances[0]?.functionId).not.toHaveBeenCalled();
 		expect(mockAgentInstances[0]?.thinking).toHaveBeenCalledWith('anthropic', {
 			mode: 'adaptive',
 			effort: 'medium',
 		});
+	});
+
+	it('names the caller only when model request labels are on', () => {
+		process.env.N8N_AI_ANTHROPIC_KEY = 'env-key';
+		process.env.N8N_INSTANCE_AI_MODEL_REQUEST_LABELS = 'true';
+		try {
+			createEvalAgent('test-agent', { instructions: 'Do the task.' });
+		} finally {
+			delete process.env.N8N_INSTANCE_AI_MODEL_REQUEST_LABELS;
+		}
+
+		expect(mockAgentInstances[0]?.functionId).toHaveBeenCalledWith('test-agent');
+	});
+
+	it('turns a helper name with spaces or slashes into a safe caller id', () => {
+		process.env.N8N_AI_ANTHROPIC_KEY = 'env-key';
+		process.env.N8N_INSTANCE_AI_MODEL_REQUEST_LABELS = 'true';
+
+		createEvalAgent('eval mock/Slack node', { instructions: 'Do the task.' });
+
+		expect(mockAgentInstances[0]?.functionId).toHaveBeenCalledWith('eval-mock-Slack-node');
 	});
 
 	it('prefers env-based model resolution over the fallback', () => {

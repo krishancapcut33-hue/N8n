@@ -265,6 +265,13 @@ function usageLogHooks(
 	};
 }
 
+/** Same switch as `InstanceAiConfig.modelRequestLabels`, read here so harness callers share it. */
+function requestLabelsEnabled(): boolean {
+	return ['true', '1'].includes(
+		(process.env.N8N_INSTANCE_AI_MODEL_REQUEST_LABELS ?? '').toLowerCase(),
+	);
+}
+
 export function createEvalAgent(
 	name: string,
 	options: {
@@ -286,6 +293,8 @@ export function createEvalAgent(
 		options.fallbackModelConfig,
 	);
 	const agent = new Agent(name).model(model);
+	// The SDK accepts only `[A-Za-z0-9._-]` in a caller id.
+	if (requestLabelsEnabled()) agent.functionId(name.replace(/[^A-Za-z0-9._-]+/g, '-'));
 	if (options.modelFetch) agent.modelFetch(options.modelFetch);
 	if (options.telemetry) agent.telemetry(options.telemetry);
 

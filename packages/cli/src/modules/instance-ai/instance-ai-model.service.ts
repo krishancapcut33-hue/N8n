@@ -1,12 +1,14 @@
 import { splitModelId } from '@n8n/ai-utilities/agent-config';
 import {
 	UNLIMITED_CREDITS,
+	buildProxyHeaders,
 	isMoonshotaiKimiK3ModelId,
 	type InstanceAiCredits,
 	type ProxyContext,
 } from '@n8n/api-types';
 import { Logger } from '@n8n/backend-common';
 import { OutboundHttp, type CustomFetch } from '@n8n/backend-network';
+import { InstanceAiConfig } from '@n8n/config';
 import type { User } from '@n8n/db';
 import { Service } from '@n8n/di';
 import { isEndpointModelConfig, type ModelConfig } from '@n8n/instance-ai';
@@ -45,13 +47,35 @@ export class InstanceAiModelService {
 		private readonly aiService: AiService,
 		private readonly outboundHttp: OutboundHttp,
 		private readonly logger: Logger,
+		private readonly instanceAiConfig: InstanceAiConfig,
 	) {}
 
 	private modelFetch?: CustomFetch;
 
 	/** Transport for Instance AI model calls on the direct path (long AI timeouts, env proxy). */
 	getModelFetch(): CustomFetch {
-		return (this.modelFetch ??= createAiProxyFetch(this.outboundHttp));
+		this.modelFetch ??= createAiProxyFetch(this.outboundHttp);
+		return this.modelFetch;
+	}
+
+	/**
+	 * The same transport for the Assistant's agent calls. With
+	 * `N8N_INSTANCE_AI_MODEL_REQUEST_LABELS` on, each request carries the feature, version,
+	 * run and thread headers that the AI service proxy path sends.
+	 */
+	getLabeledModelFetch(proxyContext: ProxyContext): CustomFetch {
+		const baseFetch = this.getModelFetch();
+		if (!this.instanceAiConfig.modelRequestLabels) return baseFetch;
+		const labels = buildProxyHeaders({
+			feature: 'instance-ai',
+			n8nVersion: N8N_VERSION,
+			...proxyContext,
+		});
+		return async (input, init) => {
+			const headers = new Headers(init?.headers);
+			for (const [name, value] of Object.entries(labels)) headers.set(name, value);
+			return await baseFetch(input, { ...init, headers });
+		};
 	}
 
 	/** Whether the AI service proxy is enabled for credit counting. */
