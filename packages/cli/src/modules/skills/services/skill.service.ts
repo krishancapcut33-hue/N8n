@@ -23,6 +23,7 @@ import { Service } from '@n8n/di';
 import { ConflictError, NotFoundError, UserError } from '@n8n/errors';
 import { generateNanoId } from '@n8n/utils/generate-nano-id';
 
+import type { SkillFrontmatter } from '../database/entities/skill-version.entity';
 import type { Skill, SkillSource } from '../database/entities/skill.entity';
 import {
 	SkillRepository,
@@ -30,9 +31,14 @@ import {
 	type SkillVisibility,
 } from '../database/repositories/skill.repository';
 import { SkillNameTakenError } from '../errors/skill-name-taken.error';
+import { SkillSyncedError } from '../errors/skill-synced.error';
 import {
+	contentToAgentSkill,
+	rowContent,
+	syncedSourceLabel,
 	toAgentSkill,
 	toSkillContent,
+	toSkillUpdate,
 	trimmedName,
 	withTrimmedName,
 	type McpSkillContent,
@@ -42,7 +48,7 @@ import {
 	type SkillTarget,
 	type SkillUpdate,
 } from '../utils/skill-content';
-import { skillContentHash } from '../utils/skill-content-hash';
+import { skillContentHash, type SkillContent } from '../utils/skill-content-hash';
 import { getSkillHash } from '../utils/skill-hash';
 import { AssistantSkillsFlagGate } from './assistant-skills-flag-gate';
 import { SkillAccessService } from './skill-access.service';
@@ -75,7 +81,7 @@ function toMcpSkillContent(row: ResolvedSkillRow): McpSkillContent {
 	return { id: row.skill.id, projectId: row.skill.projectId, skill: toAgentSkill(row) };
 }
 
-function assertHasInstructions(skill: AgentSkill): void {
+function assertHasInstructions(skill: Pick<AgentSkill, 'instructions'>): void {
 	if (!skill.instructions.trim()) throw new UserError('Skill instructions are required.');
 }
 
@@ -270,7 +276,7 @@ export class SkillService {
 		if (!moves && availableToAssistant === undefined) {
 			const { followingAgentIds: _following, ...saved } = await this.saveTrusted(
 				skillId,
-				update,
+				toSkillUpdate(update, update.baseSkillHash),
 				user.id,
 			);
 			if (saved.created) {
@@ -295,7 +301,12 @@ export class SkillService {
 			if (availableToAssistant !== undefined) {
 				await this.setAssistantAvailability(skillId, availableToAssistant, target ?? skill, ctx);
 			}
-			return await this.saveTrusted(skillId, update, user.id, ctx);
+			return await this.saveTrusted(
+				skillId,
+				toSkillUpdate(update, update.baseSkillHash),
+				user.id,
+				ctx,
+			);
 		});
 		// `saveTrusted` leaves the refresh to the caller when it joins a transaction.
 		await this.refreshFollowingAgents(followingAgentIds);
@@ -324,13 +335,15 @@ export class SkillService {
 	/**
 	 * Creates a skill with its v1. Returns the new id. `checkNameTaken` is for a name that a
 	 * user or the builder chose. A copy of an agent skill for a new agent keeps the name of
-	 * the skill it copies, so it skips the check.
+	 * the skill it copies, so it skips the check. `frontmatter` holds the SKILL.md keys
+	 * other than name and description, stored as given.
 	 */
 	async createTrusted(
 		input: {
 			id?: string;
 			target: SkillTarget;
 			skill: AgentSkill;
+			frontmatter?: SkillFrontmatter;
 			source: SkillSource;
 			createdById: string;
 			checkNameTaken?: boolean;
@@ -345,7 +358,7 @@ export class SkillService {
 		const id = input.id ?? `skill_${generateNanoId()}`;
 		await this.skillRepository.createSkill(
 			{ id, target: input.target, source: input.source, createdById: input.createdById },
-			toSkillContent(skill),
+			toSkillContent(skill, input.frontmatter),
 			ctx,
 		);
 		this.logger.debug('Created skill', { skillId: id });
@@ -361,35 +374,52 @@ export class SkillService {
 	 *
 	 * When `ctx` has a transaction, the caller calls `refreshFollowingAgents` after its
 	 * commit. `pushRef` is the tab that saved: it gets no reload push.
+	 *
+	 * The content of a synced skill changes only with `allowSynced`. Only Skill Sync passes
+	 * it, with content that it fetched from the source and the user accepted.
 	 */
 	async saveTrusted(
 		skillId: string,
 		update: SkillUpdate,
 		userId: string,
 		ctx: OperationContext = {},
-		pushRef?: string,
+		{ pushRef, allowSynced = false }: { pushRef?: string; allowSynced?: boolean } = {},
 	): Promise<SkillSaveResult> {
 		const { saved, following } = await this.txRunner.run(ctx, async (txCtx) => {
 			await this.skillRepository.lockForEdit([skillId], txCtx);
 			const latest = (await this.skillRepository.findLatestSaved([skillId], txCtx)).get(skillId);
 			if (!latest) throw new NotFoundError('Skill not found');
 			const current = toAgentSkill(latest);
-			const { baseSkillHash, allowedTools: _ignored, ...changes } = update;
-			// Only a new name is trimmed, so a save never renames a skill it did not rename.
-			if (changes.name !== undefined) changes.name = trimmedName(changes.name);
-			if (baseSkillHash !== getSkillHash(current)) {
+			const { baseSkillHash, baseContentHash, ...changes } = update;
+			const startsFromLatest =
+				baseContentHash !== undefined
+					? baseContentHash === latest.version.contentHash
+					: baseSkillHash === getSkillHash(current);
+			if (!startsFromLatest) {
 				throw new ConflictError(
 					'The skill was changed somewhere else. Reload to get the latest version.',
 				);
 			}
-			const skill: AgentSkill = { ...current, ...changes };
-			if (!skill.references?.length) delete skill.references;
-			assertHasInstructions(skill);
-			const content = toSkillContent(skill, latest.version.frontmatter);
+			// Only a new name is trimmed, so a save never renames a skill it did not rename.
+			if (changes.name !== undefined) changes.name = trimmedName(changes.name);
+			const merged = { ...rowContent(latest), ...changes };
+			const content: SkillContent = {
+				...merged,
+				frontmatter:
+					merged.frontmatter && Object.keys(merged.frontmatter).length > 0
+						? { ...merged.frontmatter }
+						: null,
+			};
+			assertHasInstructions(content);
+			const skill = contentToAgentSkill(content);
 			if (skillContentHash(content) === latest.version.contentHash) {
 				const unchanged = { versionId: latest.version.id, version: latest.version.version };
 				const result = { ...unchanged, created: false, skill: current, followingAgentIds: [] };
 				return { saved: result, following: [] };
+			}
+			const sourceLabel = syncedSourceLabel(latest.skill.source);
+			if (sourceLabel && !allowSynced) {
+				throw new SkillSyncedError(latest.version.name, sourceLabel);
 			}
 			// A rename that only changes case or separators keeps the name key, so it can
 			// clash with nothing new. The legacy rule skipped it too.
