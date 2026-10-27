@@ -30,7 +30,7 @@ import type {
 	CredentialResolutionFailure,
 } from '../entities/credential/credential.types';
 import { DataTableImporter } from '../entities/data-table/data-table-importer';
-import { dropRepeatedSharedWrites } from '../entities/skill/skill-import.types';
+import { reconcileSharedWrites } from '../entities/skill/skill-import.types';
 import type {
 	DataTableImportPlan,
 	DataTableImportRequest,
@@ -357,7 +357,7 @@ export class ImportOrchestrator {
 		const plans: ImportPlan[] = [];
 		for (const input of inputs) plans.push(await this.planScope(input));
 		if (!plans.some((plan) => plan.agentPlan)) return plans;
-		dropRepeatedSharedWrites(plans.flatMap(({ agentPlan }) => agentPlan?.skills ?? []));
+		this.reconcileSkillWrites(plans);
 
 		const agentImporter = await this.getAgentImporter();
 		const { AgentImportBindings } = await import('../entities/agent/agent-import-bindings.js');
@@ -367,6 +367,15 @@ export class ImportOrchestrator {
 			scope.blockingIssues.push(...scope.agentPlan.issues);
 		}
 		return plans;
+	}
+
+	/** Applies the skill checks that span the project scopes of one package. */
+	private reconcileSkillWrites(plans: ImportPlan[]): void {
+		const scopes = plans.flatMap(({ agentPlan }) =>
+			agentPlan?.skills ? [{ agentPlan, skills: agentPlan.skills }] : [],
+		);
+		const issues = reconcileSharedWrites(scopes.map(({ skills }) => skills));
+		for (const [index, { agentPlan }] of scopes.entries()) agentPlan.issues.push(...issues[index]);
 	}
 
 	private async getAgentImporter(): Promise<AgentImporter> {
