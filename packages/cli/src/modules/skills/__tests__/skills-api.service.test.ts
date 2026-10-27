@@ -38,6 +38,7 @@ function skill(
 		agentId: target.agentId ?? null,
 		source: 'ui',
 		availableToAssistant: false,
+		availableToMCP: false,
 		createdById: target.createdById ?? null,
 		createdAt: DATE,
 		updatedAt: DATE,
@@ -369,6 +370,7 @@ describe('SkillsApiService', () => {
 				latestVersion: 2,
 				usedByAgents: 2,
 				availableToAssistant: false,
+				availableToMCP: false,
 				canEdit: true,
 				canDelete: false,
 				createdAt: DATE.toISOString(),
@@ -541,6 +543,22 @@ describe('SkillsApiService', () => {
 			);
 
 			expect(detail).toMatchObject({ id: 'skill_new', name: 'Skill', canEdit: false });
+		});
+
+		it('makes the new skill available to MCP clients in the create transaction', async () => {
+			vi.mocked(hasGlobalScope).mockReturnValue(true);
+
+			await service.create(user, payload({ availableToMCP: true }));
+
+			const target = { projectId: null, agentId: null };
+			expect(skillService.create).toHaveBeenCalledWith(expect.objectContaining({ target }), TX_CTX);
+			expect(skillService.setMcpAvailability).toHaveBeenCalledWith(
+				'skill_new',
+				true,
+				target,
+				TX_CTX,
+			);
+			expect(skillService.setAssistantAvailability).not.toHaveBeenCalled();
 		});
 
 		it('reports the create with the method the client sent', async () => {
@@ -772,6 +790,31 @@ describe('SkillsApiService', () => {
 				3,
 				false,
 			);
+		});
+
+		it('stores an MCP availability change in the transaction of the save, without a move', async () => {
+			skillService.save.mockResolvedValue({ ...saved, created: false });
+
+			await service.update(
+				user,
+				'skill_a',
+				update({ availableToMCP: true, baseSkillHash: 'base' }),
+			);
+
+			expect(skillService.setMcpAvailability).toHaveBeenCalledWith(
+				'skill_a',
+				true,
+				visible[0],
+				TX_CTX,
+			);
+			expect(skillService.save).toHaveBeenCalledWith(
+				'skill_a',
+				{ baseSkillHash: 'base' },
+				user.id,
+				TX_CTX,
+			);
+			expect(skillService.changeTarget).not.toHaveBeenCalled();
+			expect(skillsTelemetry.updated).not.toHaveBeenCalled();
 		});
 
 		it('refuses a user who may not edit the skill', async () => {

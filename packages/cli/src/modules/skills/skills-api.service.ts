@@ -147,13 +147,19 @@ export class SkillsApiService {
 			source,
 			createdById: user.id,
 		};
-		const id = payload.availableToAssistant
-			? await this.txRunner.run({}, async (ctx) => {
-					const createdId = await this.skillService.create(input, ctx);
-					await this.skillService.setAssistantAvailability(createdId, true, target, ctx);
-					return createdId;
-				})
-			: await this.skillService.create(input);
+		const id =
+			payload.availableToAssistant || payload.availableToMCP
+				? await this.txRunner.run({}, async (ctx) => {
+						const createdId = await this.skillService.create(input, ctx);
+						if (payload.availableToAssistant) {
+							await this.skillService.setAssistantAvailability(createdId, true, target, ctx);
+						}
+						if (payload.availableToMCP) {
+							await this.skillService.setMcpAvailability(createdId, true, target, ctx);
+						}
+						return createdId;
+					})
+				: await this.skillService.create(input);
 		await this.skillsTelemetry.created(
 			user.id,
 			[{ id, ...target }],
@@ -180,7 +186,7 @@ export class SkillsApiService {
 			throw new NotFoundError('Skill not found');
 		}
 		const skill = await this.requireAccess(user, skillId, 'update');
-		const { scope, projectId, availableToAssistant, ...update } = payload;
+		const { scope, projectId, availableToAssistant, availableToMCP, ...update } = payload;
 		const target = scope ? await this.targetForCreate(user, { scope, projectId }) : undefined;
 		const moves =
 			target !== undefined &&
@@ -188,7 +194,7 @@ export class SkillsApiService {
 
 		const checkedSource = moves ? await this.skillService.assertCanMove(user, skillId) : undefined;
 
-		if (!moves && availableToAssistant === undefined) {
+		if (!moves && availableToAssistant === undefined && availableToMCP === undefined) {
 			const { followingAgentIds: _following, ...saved } = await this.skillService.save(
 				skillId,
 				update,
@@ -220,6 +226,9 @@ export class SkillsApiService {
 					target ?? skill,
 					ctx,
 				);
+			}
+			if (availableToMCP !== undefined) {
+				await this.skillService.setMcpAvailability(skillId, availableToMCP, target ?? skill, ctx);
 			}
 			return await this.skillService.save(skillId, update, user.id, ctx);
 		});
@@ -405,6 +414,7 @@ export class SkillsApiService {
 				latestVersion: summary.version,
 				usedByAgents: usage.get(skill.id) ?? 0,
 				availableToAssistant: skill.availableToAssistant,
+				availableToMCP: skill.availableToMCP,
 				canEdit: canEdit(skill, projectId),
 				canDelete: canDelete(skill, projectId),
 				createdAt: skill.createdAt.toISOString(),
