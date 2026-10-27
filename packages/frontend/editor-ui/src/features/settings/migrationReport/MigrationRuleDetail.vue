@@ -14,6 +14,7 @@ import type {
 } from '@n8n/api-types';
 import { useUIStore } from '@/app/stores/ui.store';
 import {
+	N8nAssistantIcon,
 	N8nBadge,
 	N8nButton,
 	N8nDataTableServer,
@@ -28,6 +29,7 @@ import {
 	N8nSettingsLayout,
 	N8nSettingsPageHeader,
 	N8nText,
+	N8nTooltip,
 	N8nUserSelect,
 } from '@n8n/design-system';
 import type { IUser, TableHeader } from '@n8n/design-system';
@@ -47,6 +49,7 @@ import { I18nT } from 'vue-i18n';
 import FindingStateSelect from './components/FindingStateSelect.vue';
 import ImpactTag from './components/ImpactTag.vue';
 import WorkflowFiltersPopover from './components/WorkflowFiltersPopover.vue';
+import { useMigrationFindingAssistant } from './useMigrationFindingAssistant';
 import {
 	DEFAULT_WORKFLOW_FILTERS,
 	matchesWorkflowFilters,
@@ -92,6 +95,7 @@ const { state, isLoading } = useAsyncState<BreakingChangeRuleDetailResult>(
 		affectedWorkflows: [],
 		recommendations: [],
 		migratable: false,
+		assistantAction: 'none',
 	},
 );
 
@@ -207,6 +211,24 @@ function ownerLabel(workflow: AffectedWorkflow): string {
 
 const showMigrate = computed(() => state.value.migratable);
 
+const findingAssistant = useMigrationFindingAssistant();
+// A rule with an automated migration offers the Assistant in the Migrate modal, after it ran.
+const assistantButton = computed(() => {
+	const action = state.value.assistantAction;
+	if (!findingAssistant.available.value || state.value.migratable || action === 'none') {
+		return undefined;
+	}
+	return action === 'review'
+		? {
+				label: i18n.baseText('settings.migrationReport.detail.assistant.reviewLabel'),
+				text: i18n.baseText('settings.migrationReport.detail.assistant.review'),
+			}
+		: {
+				label: i18n.baseText('settings.migrationReport.detail.assistant.fixLabel'),
+				text: i18n.baseText('settings.migrationReport.detail.assistant.fix'),
+			};
+});
+
 /** Rule descriptions arrive with or without a trailing period; the header copy always ends in one. */
 const ruleDescription = computed(() => {
 	const description = state.value.ruleDescription;
@@ -246,13 +268,16 @@ const tableHeaders = computed<Array<TableHeader<AffectedWorkflow>>>(() => {
 		},
 	];
 
-	// The actions column holds the Migrate and Notify buttons.
-	if (showMigrate.value || canNotify.value) {
+	// The actions column holds the Migrate, Assistant and Notify buttons.
+	if (showMigrate.value || canNotify.value || assistantButton.value) {
 		headers.push({
 			title: '',
 			key: 'actions',
 			value: () => '',
-			width: (showMigrate.value ? 160 : 0) + (canNotify.value ? 110 : 0),
+			width:
+				(showMigrate.value ? 160 : 0) +
+				(canNotify.value ? 110 : 0) +
+				(assistantButton.value ? 110 : 0),
 			disableSort: true,
 		});
 	}
@@ -294,6 +319,8 @@ function openMigrateModal(workflows: AffectedWorkflow[]) {
 		name: MIGRATE_WORKFLOW_MODAL_KEY,
 		data: {
 			ruleId: props.migrationRuleId,
+			ruleTitle: state.value.ruleTitle,
+			assistantAction: state.value.assistantAction,
 			workflows,
 			recommendations: state.value.recommendations,
 			eventBus: migrateModalBus,
@@ -1018,6 +1045,20 @@ const sortedWorkflows = computed(() => {
 							</template>
 						</I18nT>
 					</N8nInfoTip>
+					<!-- A short verb keeps the column narrow; the tooltip and aria-label name the Assistant. -->
+					<N8nTooltip v-if="assistantButton" :content="assistantButton.text" placement="top">
+						<N8nButton
+							size="small"
+							:label="assistantButton.label"
+							:aria-label="assistantButton.text"
+							data-test-id="migration-open-in-assistant-button"
+							@click="findingAssistant.open({ rule: state, workflow: item })"
+						>
+							<template #icon>
+								<N8nAssistantIcon size="small" />
+							</template>
+						</N8nButton>
+					</N8nTooltip>
 					<template v-if="showMigrate">
 						<N8nText v-if="migratedWorkflowIds.has(item.id)" color="text-light" size="small">
 							{{ i18n.baseText('settings.migrationReport.detail.migrate.migrated') }}
