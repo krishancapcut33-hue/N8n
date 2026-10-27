@@ -1,5 +1,5 @@
 import type { Logger } from '@n8n/backend-common';
-import type { SettingsRepository } from '@n8n/db';
+import { Settings, type SettingsRepository } from '@n8n/db';
 import { Container } from '@n8n/di';
 import { readFile, writeFile, access, mkdir } from 'fs/promises';
 import type { InstanceSettings, Cipher } from 'n8n-core';
@@ -10,7 +10,10 @@ import { mock, mockReset } from 'vitest-mock-extended';
 import type { Publisher } from '@/scaling/pubsub/publisher.service';
 import { InstanceWriteAccessService } from '@n8n/backend-services';
 
+import { SOURCE_CONTROL_PREFERENCES_DB_KEY } from '../constants';
+import * as sourceControlHelper from '../source-control-helper.ee';
 import { SourceControlPreferencesService } from '../source-control-preferences.service.ee';
+import { SourceControlConfig } from '../source-control.config';
 import type { SourceControlPreferences } from '../types/source-control-preferences';
 
 // Restore real fs modules for these tests since we need actual file operations
@@ -523,11 +526,132 @@ describe('SourceControlPreferencesService', () => {
 		});
 
 		it('starts a new instance on v2', async () => {
-			mockSettingsRepository.findOne.mockResolvedValue(null);
+			mockSettingsRepository.findOne
+				.mockResolvedValueOnce(null)
+				.mockResolvedValueOnce(
+					Object.assign(new Settings(), { value: JSON.stringify({ environmentsVersion: 'v2' }) }),
+				);
 
 			await loader.loadFromDbAndApplySourceControlPreferences();
 
-			expect(savedVersion()).toBe('v2');
+			expect(loader.getPreferences().environmentsVersion).toBe('v2');
+			expect(mockSettingsRepository.insertIfAbsent).toHaveBeenCalledWith(
+				SOURCE_CONTROL_PREFERENCES_DB_KEY,
+				expect.any(String),
+				true,
+			);
+			expect(mockSettingsRepository.save).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('initialization persistence errors', () => {
+		let initializer: SourceControlPreferencesService;
+		const repository = mock<SettingsRepository>();
+		const cipher = mock<Cipher>();
+		const keyPair = { privateKey: 'private', publicKey: 'public' };
+
+		beforeEach(() => {
+			mockReset(repository);
+			mockReset(cipher);
+			cipher.encryptV2.mockResolvedValue('encrypted');
+			vi.spyOn(sourceControlHelper, 'generateSshKeyPair').mockResolvedValue(keyPair);
+			initializer = new SourceControlPreferencesService(
+				instanceSettings,
+				mock(),
+				cipher,
+				repository,
+				new SourceControlConfig(),
+				mock(),
+			);
+		});
+
+		afterEach(() => vi.restoreAllMocks());
+
+		it.each(['encryption', 'insert'])(
+			'reports key pair %s failures with their cause',
+			async (operation) => {
+				const cause = new Error('Storage unavailable');
+				if (operation === 'encryption') cipher.encryptV2.mockRejectedValue(cause);
+				else repository.insertIfAbsent.mockRejectedValue(cause);
+
+				await expect(initializer.setPreferences({}, false)).rejects.toMatchObject({
+					message: 'Failed to write key pair to database',
+					cause,
+				});
+				expect(repository.save).not.toHaveBeenCalled();
+			},
+		);
+
+		it('propagates key pair read failures without generating keys', async () => {
+			const cause = new Error('Read unavailable');
+			repository.findByKey.mockRejectedValue(cause);
+
+			await expect(initializer.setPreferences({}, false)).rejects.toBe(cause);
+			expect(sourceControlHelper.generateSshKeyPair).not.toHaveBeenCalled();
+			expect(repository.insertIfAbsent).not.toHaveBeenCalled();
+		});
+
+		it('propagates key generation failures without writing settings', async () => {
+			const cause = new Error('Generation unavailable');
+			vi.mocked(sourceControlHelper.generateSshKeyPair).mockRejectedValue(cause);
+
+			await expect(initializer.setPreferences({}, false)).rejects.toBe(cause);
+			expect(repository.insertIfAbsent).not.toHaveBeenCalled();
+			expect(repository.save).not.toHaveBeenCalled();
+		});
+
+		it('reports default preference insertion failures with their cause', async () => {
+			const cause = new Error('Storage unavailable');
+			repository.findOne.mockResolvedValue(null);
+			repository.insertIfAbsent.mockRejectedValue(cause);
+
+			await expect(initializer.loadFromDbAndApplySourceControlPreferences()).rejects.toMatchObject({
+				message: 'Failed to save source control preferences',
+				cause,
+			});
+		});
+
+		it('reports explicit key regeneration failures with their cause', async () => {
+			const cause = new Error('Storage unavailable');
+			repository.save.mockRejectedValue(cause);
+
+			await expect(initializer.generateAndSaveKeyPair()).rejects.toMatchObject({
+				message: 'Failed to write key pair to database',
+				cause,
+			});
+			expect(repository.insertIfAbsent).not.toHaveBeenCalled();
+		});
+
+		it('applies the preferences stored by another main after an absent read', async () => {
+			const preferences = {
+				connected: true,
+				branchName: 'release',
+				environmentsVersion: 'v1',
+				keyGeneratorType: 'rsa',
+			};
+			repository.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce(
+				Object.assign(new Settings(), {
+					key: SOURCE_CONTROL_PREFERENCES_DB_KEY,
+					value: JSON.stringify(preferences),
+					loadOnStartup: true,
+				}),
+			);
+			repository.findByKey.mockResolvedValue(
+				Object.assign(new Settings(), {
+					key: 'features.sourceControl.sshKeys',
+					value: JSON.stringify({
+						publicKey: 'stored-public',
+						encryptedPrivateKey: 'stored-private',
+					}),
+					loadOnStartup: true,
+				}),
+			);
+
+			await initializer.loadFromDbAndApplySourceControlPreferences();
+
+			expect(initializer.getPreferences()).toMatchObject(preferences);
+			expect(repository.save).not.toHaveBeenCalled();
+			expect(sourceControlHelper.generateSshKeyPair).not.toHaveBeenCalled();
 		});
 	});
 

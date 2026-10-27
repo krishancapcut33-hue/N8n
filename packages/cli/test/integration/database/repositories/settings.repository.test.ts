@@ -72,6 +72,26 @@ describe('SettingsRepository', () => {
 		});
 	});
 
+	describe('insertIfAbsent()', () => {
+		it('stores new settings without loading them on startup by default', async () => {
+			await expect(settingsRepository.insertIfAbsent('test.insert', 'first')).resolves.toBe(true);
+			expect(await settingsRepository.findByKey('test.insert')).toMatchObject({
+				value: 'first',
+				loadOnStartup: false,
+			});
+		});
+
+		it('keeps the stored value and startup flag when a key already exists', async () => {
+			await settingsRepository.insertIfAbsent('test.insert', 'first', true);
+
+			await expect(settingsRepository.insertIfAbsent('test.insert', 'second')).resolves.toBe(false);
+			expect(await settingsRepository.findByKey('test.insert')).toMatchObject({
+				value: 'first',
+				loadOnStartup: true,
+			});
+		});
+	});
+
 	describe('findByKeys()', () => {
 		it('should return empty array when given empty keys array', async () => {
 			await settingsRepository.save({
