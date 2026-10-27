@@ -17,6 +17,14 @@ export interface JobAdvance {
 	lastFiredAt: Date | null;
 }
 
+/** The schedule state of one job and the finish time of its newest succeeded run. */
+export interface JobScheduleState {
+	ownerId: string;
+	nextRunAt: Date | null;
+	runnable: boolean;
+	lastSucceededAt: Date | null;
+}
+
 /** A job row to insert; remaining bookkeeping columns take their schema defaults. */
 export type NewScheduledJob = Pick<
 	ScheduledJob,
@@ -162,18 +170,34 @@ export class ScheduledJobRepository extends Repository<ScheduledJob> {
 	 * The owner id and schedule state of every job owners of one kind hold.
 	 * A job is runnable when the scheduler will claim it: enabled and not quarantined.
 	 */
-	async findScheduleStatesByOwnerType(
-		ownerType: string,
-	): Promise<Array<Pick<ScheduledJob, 'ownerId' | 'nextRunAt'> & { runnable: boolean }>> {
-		const rows = await this.find({
-			where: { ownerType },
-			select: ['ownerId', 'enabled', 'nextRunAt', 'orphanedAt'],
+	async findScheduleStatesByOwnerType(ownerType: string): Promise<JobScheduleState[]> {
+		const { entities, raw } = await this.createQueryBuilder('job')
+			.select(['job.id', 'job.ownerId', 'job.enabled', 'job.nextRunAt', 'job.orphanedAt'])
+			.addSelect(
+				(subQuery) =>
+					subQuery
+						.select('task.finishedAt')
+						.from(ScheduledTask, 'task')
+						.where('task.jobId = job.id')
+						.andWhere('task.status = :succeeded')
+						.orderBy('task.scheduledFor', 'DESC')
+						.limit(1),
+				'last_succeeded_at',
+			)
+			.where('job.ownerType = :ownerType', {
+				ownerType,
+				succeeded: ScheduledTaskStatus.Succeeded,
+			})
+			.getRawAndEntities<{ last_succeeded_at: Date | string | null }>();
+		return entities.map(({ ownerId, enabled, nextRunAt, orphanedAt }, index) => {
+			const lastSucceededAt = raw[index].last_succeeded_at;
+			return {
+				ownerId,
+				nextRunAt,
+				runnable: enabled && orphanedAt === null,
+				lastSucceededAt: lastSucceededAt === null ? null : parseDbTime(lastSucceededAt),
+			};
 		});
-		return rows.map(({ ownerId, enabled, nextRunAt, orphanedAt }) => ({
-			ownerId,
-			nextRunAt,
-			runnable: enabled && orphanedAt === null,
-		}));
 	}
 
 	/**
