@@ -52,6 +52,7 @@ import { CredentialsService } from '@/credentials/credentials.service';
 import type { InstanceCredentialUseRegistry } from '@/credentials/instance-credential-use.registry';
 import * as validation from '@/credentials/validation';
 import type { CredentialsHelper } from '@/credentials-helper';
+import type { CredentialsOverwrites } from '@/credentials-overwrites';
 import type { PolicyActor } from '@/policy/policy-enforcement-backend';
 import type { PolicyEnforcementService } from '@/policy/policy-enforcement.service';
 import { PolicyViolationError } from '@/policy/policy-violation.error';
@@ -115,6 +116,7 @@ describe('CredentialsService', () => {
 	const credentialsRepository = mock<CredentialsRepository>();
 	const postHogClient = mock<PostHogClient>();
 	const credentialDescriptions = new CredentialDescriptionsService(postHogClient);
+	const credentialsOverwrites = mock<CredentialsOverwrites>();
 	const credentialDependencyService = mock<CredentialDependencyService>();
 	const sharedCredentialsRepository = mock<SharedCredentialsRepository>();
 	const ownershipService = mock<OwnershipService>();
@@ -164,6 +166,7 @@ describe('CredentialsService', () => {
 		transactionRunner,
 		policyEnforcementService,
 		credentialDescriptions,
+		credentialsOverwrites,
 	);
 
 	beforeEach(() => {
@@ -1783,6 +1786,221 @@ describe('CredentialsService', () => {
 
 			expect(credentialsRepository.findProjectCredentialWithoutOwner).not.toHaveBeenCalled();
 			expect(credentialsRepository.delete).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('updateDescription', () => {
+		const credential = mock<CredentialsEntity>({
+			id: 'cred-1',
+			name: 'Reporting',
+			type: 'postgres',
+			data: 'encrypted-secret',
+			isManaged: false,
+			isResolvable: false,
+			description: 'Old description',
+			createdAt: new Date('2026-01-01T00:00:00.000Z'),
+			updatedAt: new Date('2026-01-02T00:00:00.000Z'),
+		});
+
+		beforeEach(() => {
+			vi.spyOn(Credentials.prototype, 'getData').mockResolvedValue({});
+			credentialsOverwrites.supportsManagedAuth.mockReturnValue(false);
+			credentialsOverwrites.usesManagedAuth.mockReturnValue(false);
+			credentialsFinderService.findCredentialForUser.mockResolvedValue(credential);
+			credentialsRepository.findOneBy.mockResolvedValue(credential);
+			transactionRunner.run.mockImplementation(async (ctx, run) => await run(ctx));
+			credentialsRepository.updateDescription.mockImplementation(async (id, description) => ({
+				id,
+				name: credential.name,
+				type: credential.type,
+				description,
+			}));
+		});
+
+		it.each([
+			['  Production reporting  ', 'Production reporting'],
+			[null, null],
+		])('saves normalized description %j without secret data', async (input, expected) => {
+			const result = await service.updateDescription(ownerUser, 'cred-1', input);
+			expect(result).toEqual({
+				id: 'cred-1',
+				name: 'Reporting',
+				type: 'postgres',
+				description: expected,
+			});
+			expect(credentialsFinderService.findCredentialForUser).toHaveBeenCalledWith(
+				'cred-1',
+				ownerUser,
+				['credential:update'],
+			);
+			expect(credentialsRepository.updateDescription).toHaveBeenCalledWith('cred-1', expected, {
+				policyCleared: cleared,
+			});
+			expect(externalHooks.run).toHaveBeenCalledExactlyOnceWith('credentials.update', [
+				{
+					id: credential.id,
+					name: credential.name,
+					type: credential.type,
+					data: credential.data,
+					description: expected,
+					createdAt: credential.createdAt,
+					updatedAt: credential.updatedAt,
+				},
+			]);
+			expect(eventService.emit).toHaveBeenCalledExactlyOnceWith('credentials-updated', {
+				user: ownerUser,
+				credentialId: credential.id,
+				credentialName: credential.name,
+				credentialType: credential.type,
+				credentialDescriptionLength: expected?.length ?? 0,
+				isDynamic: false,
+				usesExternalSecrets: false,
+				jweEnabled: false,
+				supportsManagedAuth: false,
+				usesManagedAuth: false,
+			});
+			expect(JSON.stringify(eventService.emit.mock.calls)).not.toContain('Production reporting');
+		});
+
+		it('emits stored auth flags without credential data or description text', async () => {
+			const data = {
+				apiKey: '={{ $secrets.vault.apiKey }}',
+				clientSecret: 'stored-client-secret',
+				jweEnabled: true,
+				oauthTokenData: { access_token: 'stored-access-token' },
+			};
+			vi.mocked(Credentials.prototype.getData).mockResolvedValue(data);
+			credentialsOverwrites.supportsManagedAuth.mockReturnValue(true);
+			credentialsOverwrites.usesManagedAuth.mockReturnValue(true);
+
+			const result = await service.updateDescription(ownerUser, 'cred-1', 'New description');
+
+			expect(credentialsOverwrites.supportsManagedAuth).toHaveBeenCalledWith(credential.type);
+			expect(credentialsOverwrites.usesManagedAuth).toHaveBeenCalledWith(credential.type, data);
+			expect(eventService.emit).toHaveBeenCalledExactlyOnceWith('credentials-updated', {
+				user: ownerUser,
+				credentialId: credential.id,
+				credentialName: credential.name,
+				credentialType: credential.type,
+				credentialDescriptionLength: 'New description'.length,
+				isDynamic: false,
+				usesExternalSecrets: true,
+				jweEnabled: true,
+				supportsManagedAuth: true,
+				usesManagedAuth: true,
+			});
+			expect(result).toEqual({
+				id: credential.id,
+				name: credential.name,
+				type: credential.type,
+				description: 'New description',
+			});
+			expect(credentialsRepository.updateDescription).toHaveBeenCalledExactlyOnceWith(
+				'cred-1',
+				'New description',
+				{ policyCleared: cleared },
+			);
+		});
+
+		it('does not write or emit an event when stored data cannot be read', async () => {
+			const error = new CredentialDataError(
+				mock<Credentials>({ id: credential.id }),
+				CREDENTIAL_ERRORS.DECRYPTION_FAILED,
+			);
+			vi.mocked(Credentials.prototype.getData).mockRejectedValue(error);
+
+			await expect(service.updateDescription(ownerUser, 'cred-1', 'New')).rejects.toThrow(error);
+			expect(credentialsRepository.updateDescription).not.toHaveBeenCalled();
+			expect(eventService.emit).not.toHaveBeenCalled();
+		});
+
+		it('requires update access before running hooks', async () => {
+			credentialsFinderService.findCredentialForUser.mockResolvedValue(null);
+			await expect(service.updateDescription(memberUser, 'cred-1', 'New')).rejects.toThrow(
+				'Credential not found or access denied',
+			);
+			expect(externalHooks.run).not.toHaveBeenCalled();
+			expect(Credentials.prototype.getData).not.toHaveBeenCalled();
+			expect(credentialsRepository.updateDescription).not.toHaveBeenCalled();
+		});
+
+		it('rejects managed credentials', async () => {
+			credentialsFinderService.findCredentialForUser.mockResolvedValue({
+				...credential,
+				isManaged: true,
+			});
+			await expect(service.updateDescription(ownerUser, 'cred-1', 'New')).rejects.toThrow(
+				'Managed credentials',
+			);
+			expect(credentialsRepository.updateDescription).not.toHaveBeenCalled();
+		});
+
+		it.each([false, undefined])('does not write when the flag is %s', async (enabled) => {
+			postHogClient.getFeatureFlagForInstance.mockResolvedValue(enabled);
+			await expect(service.updateDescription(ownerUser, 'cred-1', 'New')).rejects.toThrow(
+				'not enabled',
+			);
+			expect(credentialsRepository.updateDescription).not.toHaveBeenCalled();
+		});
+
+		it('rechecks the flag after hooks', async () => {
+			postHogClient.getFeatureFlagForInstance.mockResolvedValueOnce(true).mockResolvedValue(false);
+			await expect(service.updateDescription(ownerUser, 'cred-1', 'New')).rejects.toThrow(
+				'not enabled',
+			);
+			expect(credentialsRepository.updateDescription).not.toHaveBeenCalled();
+		});
+
+		it('rejects text over the cap before running hooks', async () => {
+			await expect(service.updateDescription(ownerUser, 'cred-1', 'x'.repeat(513))).rejects.toThrow(
+				'512',
+			);
+			expect(externalHooks.run).not.toHaveBeenCalled();
+			expect(credentialsRepository.updateDescription).not.toHaveBeenCalled();
+		});
+
+		it('preserves credential policy enforcement', async () => {
+			policyEnforcementService.enforceCredentialSave.mockRejectedValue(new Error('Policy refused'));
+			await expect(service.updateDescription(ownerUser, 'cred-1', 'New')).rejects.toThrow(
+				'Policy refused',
+			);
+			expect(credentialsRepository.updateDescription).not.toHaveBeenCalled();
+			expect(Credentials.prototype.getData).not.toHaveBeenCalled();
+			expect(eventService.emit).not.toHaveBeenCalled();
+		});
+
+		it('keeps hook changes to secret data out of the description write', async () => {
+			externalHooks.run.mockImplementation(async (_name, parameters) => {
+				const payload = parameters?.[0];
+				if (typeof payload !== 'object' || payload === null) {
+					throw new Error('Expected a credential hook payload');
+				}
+				Object.assign(payload, {
+					description: '  Updated by hook  ',
+					data: 'changed-data',
+					name: 'Changed name',
+				});
+			});
+			const result = await service.updateDescription(ownerUser, 'cred-1', 'New');
+			expect(result).toEqual({
+				id: 'cred-1',
+				name: 'Reporting',
+				type: 'postgres',
+				description: 'Updated by hook',
+			});
+			expect(credentialsRepository.updateDescription).toHaveBeenCalledWith(
+				'cred-1',
+				'Updated by hook',
+				{ policyCleared: cleared },
+			);
+		});
+
+		it('reports a credential removed before persistence', async () => {
+			credentialsRepository.updateDescription.mockResolvedValue(null);
+			await expect(service.updateDescription(ownerUser, 'cred-1', 'New')).rejects.toThrow(
+				'Credential not found',
+			);
+			expect(eventService.emit).not.toHaveBeenCalled();
 		});
 	});
 

@@ -23,6 +23,7 @@ vi.mock('../credentials.tool', () => ({
 	createSetupCredentialsTool: vi.fn(() => ({ id: 'setup_credentials' })),
 	createTestCredentialTool: vi.fn(() => ({ id: 'test_credential' })),
 	createDeleteCredentialTool: vi.fn(() => ({ id: 'delete_credential' })),
+	createUpdateCredentialDescriptionTool: vi.fn(() => ({ id: 'update_credential_description' })),
 }));
 
 vi.mock('../data-tables.tool', () => ({
@@ -130,6 +131,29 @@ describe('domain tool construction', () => {
 		vi.clearAllMocks();
 		vi.mocked(isParseableAttachment).mockReturnValue(false);
 	});
+
+	it.each([
+		[true, true, true],
+		[false, true, false],
+		[undefined, true, false],
+		[true, false, false],
+	])(
+		'registers description writes for flag %s and service support %s',
+		(flag, supported, expected) => {
+			const context = makeContext({
+				credentialDescriptionsEnabled: flag,
+				credentialService: mock<InstanceAiContext['credentialService']>({
+					updateDescription: supported ? vi.fn() : undefined,
+				}),
+			});
+			expect(createOrchestratorDomainTools(context).has('update_credential_description')).toBe(
+				expected,
+			);
+			expect(
+				getActiveOrchestratorDomainToolNames(context).has('update_credential_description'),
+			).toBe(expected);
+		},
+	);
 
 	it('creates the native orchestrator domain tool map', async () => {
 		const context = makeContext();

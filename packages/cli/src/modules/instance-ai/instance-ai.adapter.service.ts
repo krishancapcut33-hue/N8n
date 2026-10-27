@@ -3039,6 +3039,11 @@ export class InstanceAiAdapterService {
 				await credentialsService.delete(user, credentialId);
 			},
 
+			async updateDescription(credentialId, description) {
+				await assertCredentialInBoundProject(credentialId);
+				return await credentialsService.updateDescription(user, credentialId, description);
+			},
+
 			async test(credentialId: string) {
 				// Mirror browser endpoint behavior: resolve credential access by scope and
 				// test using raw decrypted data from storage.

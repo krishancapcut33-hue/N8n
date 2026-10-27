@@ -1,10 +1,14 @@
 /**
- * Shared credential tools for the workflow and Agent builders: list, search types, set up, test, and delete.
+ * Shared credential tools for the workflow and Agent builders.
  */
 import { Tool } from '@n8n/agents';
-import { getCredentialDescriptionPreview } from '@n8n/ai-utilities/credential-description';
+import {
+	CREDENTIAL_DESCRIPTION_WRITE_GUIDANCE,
+	getCredentialDescriptionPreview,
+} from '@n8n/ai-utilities/credential-description';
 import {
 	getLegacyBuilderToolNames,
+	credentialDescriptionSchema,
 	AI_GATEWAY_MANAGED_TAG,
 	TEMPLATED_CUSTOM_AUTH_CREDENTIAL_TYPE,
 	type InstanceAiCredentialSetupHint,
@@ -467,6 +471,15 @@ const earlySetupCredentialsSchemaWithFolder = earlySetupCredentialsSchema.extend
 		.describe(
 			'Folder for the new workflow. Pass the intended folder here before building; omit it on the later workflow_builder_build_workflow call.',
 		),
+});
+
+const updateCredentialDescriptionSchema = z.object({
+	credentialId: credentialIdField,
+	// Keep this field required: the native schema sanitizer makes nullable fields optional.
+	description: credentialDescriptionSchema
+		.innerType()
+		.unwrap()
+		.describe('Description text. Pass blank text to clear it.'),
 });
 
 const testCredentialSchema = z.object({
@@ -1063,6 +1076,31 @@ export function createSetupCredentialsTool(context: InstanceAiContext) {
 		.handler(async (input, ctx) => {
 			const setupInput: SetupInput = inputSchema.parse(input);
 			return await handleSetup(context, setupInput, ctx);
+		})
+		.build();
+}
+
+export function createUpdateCredentialDescriptionTool(context: InstanceAiContext) {
+	return new Tool(DOMAIN_TOOL_IDS.UPDATE_CREDENTIAL_DESCRIPTION)
+		.description(
+			'Set, replace, or clear a credential description. ' + CREDENTIAL_DESCRIPTION_WRITE_GUIDANCE,
+		)
+		.input(sanitizeInputSchema(updateCredentialDescriptionSchema))
+		.handler(async (input) => {
+			const { credentialId, description } = updateCredentialDescriptionSchema.parse(input);
+			if (!context.credentialService.updateDescription) {
+				throw new Error('Credential description updates are not available');
+			}
+			const credential = await context.credentialService.updateDescription(
+				credentialId,
+				credentialDescriptionSchema.parse(description),
+			);
+			return {
+				id: credential.id,
+				name: credential.name,
+				type: credential.type,
+				description: credential.description ?? null,
+			};
 		})
 		.build();
 }

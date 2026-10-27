@@ -11,6 +11,7 @@ import { Container, Service } from '@n8n/di';
 
 import type { ProtectedResource, ResourcePrincipal, ResourceUser } from '@n8n/inbound-auth';
 import { UrlService } from '@n8n/backend-services';
+import { CredentialDescriptionsService } from '@/credentials/credential-descriptions.service';
 import { SkillAgentsProxy } from '@/modules/skills/skill-agents-proxy.service';
 import { PostHogClient } from '@/posthog';
 
@@ -74,6 +75,7 @@ export class McpProtectedResource implements ProtectedResource {
 		private readonly moduleRegistry: ModuleRegistry,
 		private readonly licenseState: LicenseState,
 		private readonly postHogClient: PostHogClient,
+		private readonly credentialDescriptions: CredentialDescriptionsService,
 	) {}
 
 	get scopes(): string[] {
@@ -95,6 +97,9 @@ export class McpProtectedResource implements ProtectedResource {
 		const tagsDisabled = this.globalConfig.tags.disabled;
 		const foldersLicensed = this.licenseState.isFoldersLicensed();
 		const supportedScopes = new Set(this.scopes);
+		const credentialDescriptionsEnabled = await this.credentialDescriptions
+			.isEnabled()
+			.catch(() => false);
 		// Consent and tool registration use the same instance activity gate.
 		const instanceContextAvailable = this.moduleRegistry.isActive('instance-ai');
 		let instanceContextEnabled = false;
@@ -109,6 +114,7 @@ export class McpProtectedResource implements ProtectedResource {
 		return Object.fromEntries(
 			Object.entries(TOOLS_BY_SCOPE)
 				.filter(([scope]) => supportedScopes.has(scope))
+				.filter(([scope]) => credentialDescriptionsEnabled || scope !== 'credential:write')
 				.map(([scope, tools]) => [
 					scope,
 					tools.filter(
@@ -190,10 +196,14 @@ export class McpProtectedResource implements ProtectedResource {
 			user,
 		);
 		const preferencesEnabled = await this.arePreferencesEnabledFor(user);
+		const credentialDescriptionsEnabled = await this.credentialDescriptions
+			.isEnabled()
+			.catch(() => false);
 
 		return this.scopes.filter(
 			(scope) =>
 				(installAvailable || scope !== 'communityPackage:install') &&
+				(credentialDescriptionsEnabled || scope !== 'credential:write') &&
 				(preferencesEnabled || !PREFERENCE_SCOPES.has(scope)),
 		);
 	}

@@ -3,7 +3,7 @@ import { zodToJsonSchema } from '@n8n/ai-utilities/json-schema';
 import type { InstanceAiPermissions } from '@n8n/api-types';
 import type { Mock } from 'vitest';
 
-import { executeTool } from '../../__tests__/tool-test-utils';
+import { executeTool, parseToolInput } from '../../__tests__/tool-test-utils';
 import { OutsideThreadProjectError } from '../../errors/outside-thread-project.error';
 import type { InstanceAiContext, CredentialSummary, CredentialDetail } from '../../types';
 import {
@@ -12,6 +12,7 @@ import {
 	createSearchCredentialTypesTool,
 	createSetupCredentialsTool,
 	createTestCredentialTool,
+	createUpdateCredentialDescriptionTool,
 } from '../credentials.tool';
 import { prepareWorkflowSetup } from '../workflows/prepare-workflow-setup';
 import type { SetupRequest } from '../workflows/setup-workflow.schema';
@@ -41,6 +42,7 @@ function createMockContext(
 		credentialService: {
 			list: vi.fn().mockResolvedValue([]),
 			get: vi.fn().mockResolvedValue({}),
+			updateDescription: vi.fn(),
 			delete: vi.fn().mockResolvedValue(undefined),
 			test: vi.fn().mockResolvedValue({ success: true }),
 			searchCredentialTypes: vi.fn().mockResolvedValue([]),
@@ -136,6 +138,45 @@ describe('credential tools', () => {
 			expect(credential.description).toBe('Read-only reporting account');
 		},
 	);
+
+	describe('update_credential_description', () => {
+		it.each([
+			['  Production reporting  ', 'Production reporting'],
+			['', null],
+		])('saves %j and returns only metadata', async (description, savedDescription) => {
+			const context = createMockContext();
+			vi.mocked(context.credentialService.updateDescription!).mockResolvedValue({
+				id: '1',
+				name: 'Reporting',
+				type: 'postgres',
+				description: savedDescription,
+				nodesWithAccess: [],
+			});
+			const result = await executeTool(
+				createUpdateCredentialDescriptionTool(context),
+				{ credentialId: '1', description },
+				noSuspendCtx(),
+			);
+			expect(context.credentialService.updateDescription).toHaveBeenCalledWith(
+				'1',
+				savedDescription,
+			);
+			expect(result).toEqual({
+				id: '1',
+				name: 'Reporting',
+				type: 'postgres',
+				description: savedDescription,
+			});
+		});
+
+		it('requires description text so an omitted field cannot clear the stored value', async () => {
+			const context = createMockContext();
+			const tool = createUpdateCredentialDescriptionTool(context);
+			expect(parseToolInput(tool, { credentialId: '1' }).success).toBe(false);
+			await expect(executeTool(tool, { credentialId: '1' }, noSuspendCtx())).rejects.toThrow();
+			expect(context.credentialService.updateDescription).not.toHaveBeenCalled();
+		});
+	});
 
 	describe('setup schema', () => {
 		it('should describe credentialType with existing "gmailOAuth2" credential type and not "gmailOAuth2Api"', () => {

@@ -59,6 +59,7 @@ import {
 
 import { CredentialTypes } from '@/credential-types';
 import { createCredentialsFromCredentialsEntity, CredentialsHelper } from '@/credentials-helper';
+import { CredentialsOverwrites } from '@/credentials-overwrites';
 import { CredentialNotFoundError } from '@/errors/credential-not-found.error';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '@n8n/errors';
 import { ExternalHooks } from '@/external-hooks';
@@ -277,6 +278,7 @@ export class CredentialsService {
 		private readonly transactionRunner: TransactionRunner,
 		private readonly policyEnforcementService: PolicyEnforcementService,
 		private readonly credentialDescriptions: CredentialDescriptionsService,
+		private readonly credentialsOverwrites: CredentialsOverwrites,
 	) {}
 
 	async countConnectedUsers(credentialId: string): Promise<number> {
@@ -1100,6 +1102,76 @@ export class CredentialsService {
 	 */
 	async decryptOrFail(credential: CredentialsEntity): Promise<ICredentialDataDecryptedObject> {
 		return await createCredentialsFromCredentialsEntity(credential).getData();
+	}
+
+	async updateDescription(user: User, credentialId: string, description: string | null) {
+		if (!(await this.credentialDescriptions.isEnabled())) {
+			throw new BadRequestError('Credential descriptions are not enabled on this instance');
+		}
+		const credential = await this.credentialsFinderService.findCredentialForUser(
+			credentialId,
+			user,
+			['credential:update'],
+		);
+		if (!credential) throw new NotFoundError('Credential not found or access denied');
+		if (credential.isManaged) throw new BadRequestError('Managed credentials cannot be updated');
+
+		const payload: ICredentialsDb = {
+			id: credential.id,
+			name: credential.name,
+			type: credential.type,
+			data: credential.data,
+			description: parseCredentialDescription(description),
+			createdAt: credential.createdAt,
+			updatedAt: credential.updatedAt,
+		};
+		await this.externalHooks.run('credentials.update', [payload]);
+		const normalizedDescription = parseCredentialDescription(payload.description);
+		if (!(await this.credentialDescriptions.isEnabled())) {
+			throw new BadRequestError('Credential descriptions are not enabled on this instance');
+		}
+		const cleared = await this.enforceCredentialUpdate(credentialId, undefined, {
+			kind: 'user',
+			user,
+		});
+		if (cleared === null) throw new NotFoundError('Credential not found or access denied');
+
+		// Derive event flags before writing. Keep the stored data out of the event and response.
+		const storedData = await this.decryptOrFail(credential);
+		const authMetadata = {
+			usesExternalSecrets: getExternalSecretExpressionPaths(storedData).length > 0,
+			jweEnabled: storedData.jweEnabled === true,
+			supportsManagedAuth: this.credentialsOverwrites.supportsManagedAuth(credential.type),
+			usesManagedAuth: this.credentialsOverwrites.usesManagedAuth(credential.type, storedData),
+		};
+
+		// Persist only the description to preserve concurrent secret and token updates.
+		const updated = await this.transactionRunner.run(
+			{ policyCleared: cleared },
+			async (ctx) =>
+				await this.credentialsRepository.updateDescription(
+					credentialId,
+					normalizedDescription,
+					ctx,
+				),
+		);
+		if (!updated) throw new NotFoundError('Credential not found or access denied');
+
+		this.eventService.emit('credentials-updated', {
+			user,
+			credentialId: updated.id,
+			credentialName: updated.name,
+			credentialType: updated.type,
+			credentialDescriptionLength: updated.description?.length ?? 0,
+			isDynamic: credential.isResolvable ?? false,
+			...authMetadata,
+		});
+		return {
+			id: updated.id,
+			name: updated.name,
+			type: updated.type,
+			description: updated.description ?? null,
+		};
 	}
 
 	async update(

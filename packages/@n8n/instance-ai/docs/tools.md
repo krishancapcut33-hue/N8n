@@ -52,7 +52,7 @@ keep their explicit pattern. `like` matches case; `ilike` ignores case.
 | `data_tables` | 11 |
 | `workspace` | 8 |
 | `workflow_builder_executions` | 8 |
-| `list_credentials`, `search_credential_types`, `setup_credentials`, `test_credential`, `delete_credential` | single-purpose |
+| `list_credentials`, `search_credential_types`, `setup_credentials`, `test_credential`, `delete_credential`, `update_credential_description` | single-purpose |
 | `mcp-servers` | 4 |
 | `conversation-history` | 2 |
 | `workflow_builder_task_control` | 3 |
@@ -805,7 +805,7 @@ Cancel a running execution.
 
 ## Credential tools
 
-Both builders use these five tools. The instance PostHog flag
+Both builders use these credential tools. The instance PostHog flag
 `120_credential_descriptions` controls description fields and selection
 guidance. Only boolean `true` enables them. When the flag is false or missing,
 `list_credentials` omits `description`, including managed entries.
@@ -837,6 +837,33 @@ With `ids`, the tool **returns** `{ credentials: [{ id, name, type, description,
 nodesWithAccess? }], notFound? }`. The description contains the full stored
 text, or `null` when unset. `notFound` lists the ids that did not resolve. The
 response never contains credential secret data.
+
+### `update_credential_description`
+
+Set, replace, or clear a description only when the user requests it. This tool
+requires the description feature flag and `credential:update` access. A chat bound
+to a project cannot edit credentials owned by another project. Managed credentials
+cannot be edited.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `credentialId` | string | yes | Credential to describe |
+| `description` | string | yes | Plain text, trimmed before the 512-character limit. Blank text clears the description. |
+
+Describe the account, environment, and intended use. This helps people and AI
+choose between credentials of the same type. Use facts the user supplied or
+confirmed. Do not include secrets or infer permissions. Descriptions provide
+context and do not change access.
+
+**Returns**: `{ id, name, type, description }`, with the saved description in full.
+Only the description is written. Credential secrets and settings stay unchanged.
+
+The instance MCP tool uses the same name and fields. MCP also accepts `null`
+to clear the description. It requires the OAuth scope `credential:write` in
+addition to the user's credential update permission. Clients that also need
+`list_credentials` must request `credential:read`. Existing scoped grants need
+authorization for the new scope. Legacy unscoped authentication keeps its existing
+behavior.
 
 ### `delete_credential`
 

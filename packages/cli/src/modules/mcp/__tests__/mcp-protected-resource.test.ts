@@ -3,6 +3,7 @@ import {
 	CONTEXT_PREFERENCES_ENABLED_VARIANT,
 	CONTEXT_PREFERENCES_FLAG,
 	INSTANCE_ACTIVITY_CONTEXT_FLAG,
+	CREDENTIAL_DESCRIPTIONS_FLAG,
 } from '@n8n/api-types';
 import type { PostHogClient } from '@/posthog';
 import type { LicenseState, ModuleRegistry } from '@n8n/backend-common';
@@ -24,6 +25,7 @@ import type { UrlService } from '@n8n/backend-services';
 
 import { Container } from '@n8n/di';
 
+import { CredentialDescriptionsService } from '@/credentials/credential-descriptions.service';
 import { CommunityPackagesConfig } from '@/modules/community-packages/community-packages.config';
 import { SkillAgentsProxy } from '@/modules/skills/skill-agents-proxy.service';
 
@@ -48,6 +50,7 @@ describe('McpProtectedResource', () => {
 	const moduleRegistry = mock<ModuleRegistry>({ settings: mock<ModuleRegistry['settings']>() });
 	const licenseState = mock<LicenseState>();
 	const postHogClient = mock<PostHogClient>();
+	const credentialDescriptions = new CredentialDescriptionsService(postHogClient);
 	const resource = new McpProtectedResource(
 		urlService,
 		mcpSettingsService,
@@ -56,6 +59,7 @@ describe('McpProtectedResource', () => {
 		moduleRegistry,
 		licenseState,
 		postHogClient,
+		credentialDescriptions,
 	);
 
 	beforeEach(() => {
@@ -76,6 +80,25 @@ describe('McpProtectedResource', () => {
 	});
 
 	describe('getScopeTools', () => {
+		it.each([true, false, undefined])(
+			'advertises credential writes only when the description flag is true (%s)',
+			async (enabled) => {
+				postHogClient.getFeatureFlagForInstance.mockImplementation(async (flag) =>
+					flag === CREDENTIAL_DESCRIPTIONS_FLAG ? enabled : true,
+				);
+				const scopeTools = await resource.getScopeTools();
+				expect(scopeTools['credential:write']).toEqual(
+					enabled === true ? ['update_credential_description'] : undefined,
+				);
+				expect(scopeTools['credential:read']).toContain('list_credentials');
+				expect(
+					(await resource.getGrantableScopes(Object.assign(new User(), { id: 'user-1' }))).includes(
+						'credential:write',
+					),
+				).toBe(enabled === true);
+			},
+		);
+
 		it('withholds Agent scopes and tools when Agents is disabled', async () => {
 			vi.mocked(moduleRegistry.settings.get).mockReturnValue({ enabled: false });
 			const scopeTools = await resource.getScopeTools();
@@ -162,9 +185,10 @@ describe('McpProtectedResource', () => {
 		it('checks the activity flag without a user argument', async () => {
 			await resource.getScopeTools();
 
-			expect(postHogClient.getFeatureFlagForInstance).toHaveBeenCalledExactlyOnceWith(
-				INSTANCE_ACTIVITY_CONTEXT_FLAG,
+			const activityFlagCalls = postHogClient.getFeatureFlagForInstance.mock.calls.filter(
+				([flag]) => flag === INSTANCE_ACTIVITY_CONTEXT_FLAG,
 			);
+			expect(activityFlagCalls).toEqual([[INSTANCE_ACTIVITY_CONTEXT_FLAG]]);
 		});
 
 		it('should drop tools this instance does not expose', async () => {
@@ -176,6 +200,7 @@ describe('McpProtectedResource', () => {
 				moduleRegistry,
 				licenseState,
 				postHogClient,
+				credentialDescriptions,
 			);
 
 			const scopeTools = await limitedResource.getScopeTools();
@@ -233,6 +258,7 @@ describe('McpProtectedResource', () => {
 				moduleRegistry,
 				licenseState,
 				postHogClient,
+				credentialDescriptions,
 			);
 
 			expect((await withoutBuilder.getScopeTools())['aiPreference:read']).toEqual([
@@ -360,6 +386,12 @@ describe('McpProtectedResource', () => {
 	describe('getGrantableScopes', () => {
 		const user = Object.assign(new User(), { id: 'user-1' });
 
+		it('withholds credential:write when the flag cannot be read', async () => {
+			postHogClient.getFeatureFlagForInstance.mockRejectedValue(new Error('Unavailable'));
+			expect(await resource.getGrantableScopes(user)).not.toContain('credential:write');
+			expect(await resource.getScopeTools()).not.toHaveProperty('credential:write');
+		});
+
 		it('offers the install scope to a user whose role allows installing', async () => {
 			hasGlobalScope.mockReturnValue(true);
 
@@ -417,6 +449,7 @@ describe('McpProtectedResource', () => {
 				moduleRegistry,
 				licenseState,
 				postHogClient,
+				credentialDescriptions,
 			);
 
 			expect(await envManaged.getGrantableScopes(user)).not.toContain('communityPackage:install');
