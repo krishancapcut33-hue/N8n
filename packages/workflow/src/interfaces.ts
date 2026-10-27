@@ -4390,6 +4390,7 @@ export type PublicInstalledPackage = {
 	updatedAt: Date;
 	updateAvailable?: string;
 	failedLoading?: boolean;
+	failedLoadingReason?: string;
 };
 
 export type PublicInstalledNode = {
