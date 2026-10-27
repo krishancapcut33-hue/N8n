@@ -144,6 +144,8 @@ beforeAll(async () => {
 
 beforeEach(async () => {
 	await agents.delete({});
+	// Skills belong to projects and outlive their agents.
+	await Container.get(SkillRepository).delete({});
 	await testDb.truncate([
 		'WorkflowEntity',
 		'WorkflowHistory',
@@ -438,12 +440,12 @@ it('applies selected Agents with complete bodies, cycles, workflow bindings and 
 	expect(input).toEqual(original);
 });
 
-it.each(['project', 'agent'] as const)(
+it.each(['project', 'instance'] as const)(
 	'rejects a skill ID owned by another %s without replacing its content',
 	async (scope) => {
 		const input = fixture();
 		input.manifest.agents.splice(1);
-		await agents.save({ id: 'other-agent', name: 'Other', projectId: project.id });
+		const elsewhere = await createTeamProject('Elsewhere', owner);
 		const body = {
 			name: 'Existing skill',
 			description: 'Keep this skill.',
@@ -453,10 +455,7 @@ it.each(['project', 'agent'] as const)(
 		await repository.createSkill(
 			{
 				id: 'support_source_skill',
-				target:
-					scope === 'project'
-						? { projectId: project.id, agentId: null }
-						: { projectId: null, agentId: 'other-agent' },
+				target: { projectId: scope === 'project' ? elsewhere.id : null },
 				source: 'ui',
 				createdById: owner.id,
 			},
@@ -965,6 +964,10 @@ it.each(['publish', 'unpublish'] as const)(
 				'agent:update',
 				'agent:publish',
 				'agent:unpublish',
+				// The package skills belong to the project.
+				'projectSkill:read',
+				'projectSkill:create',
+				'projectSkill:update',
 			],
 			{ roleType: 'project' },
 		);
@@ -1088,7 +1091,8 @@ it.each(['create', 'update'] as const)(
 		const skillRefs = Container.get(AgentSkillRefsService);
 		const beforeSkills = await skillRefs.readDraft({ id: 'research_source' }, {});
 		const skillRepository = Container.get(SkillRepository);
-		const beforeSkillCount = await skillRepository.countBy({ agentId: 'research_source' });
+		const researchSkillIds = Object.keys(second.skills);
+		const beforeSkillCount = (await skillRepository.findByIds(researchSkillIds)).length;
 		const original = structuredClone(plan.agentPlan);
 		const replace = tasks.replaceForAgent.bind(tasks);
 		vi.spyOn(tasks, 'replaceForAgent').mockImplementation(async (...args) => {
@@ -1101,7 +1105,7 @@ it.each(['create', 'update'] as const)(
 		expect(await agents.findById('research_source')).toEqual(beforeAgent);
 		expect(await tasks.findByAgentId('research_source')).toEqual(beforeTasks);
 		expect(await skillRefs.readDraft({ id: 'research_source' }, {})).toEqual(beforeSkills);
-		expect(await skillRepository.countBy({ agentId: 'research_source' })).toBe(beforeSkillCount);
+		expect(await skillRepository.findByIds(researchSkillIds)).toHaveLength(beforeSkillCount);
 		expect(await agents.findById('support_source')).toMatchObject({
 			schema: { instructions: 'Keep this earlier save.' },
 		});

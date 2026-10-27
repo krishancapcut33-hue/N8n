@@ -428,7 +428,7 @@ export class AgentsService {
 				agent,
 				skillRefs,
 				definition.skills,
-				user.id,
+				user,
 				ctx,
 			);
 			await this.agentTaskRepository.replaceForAgent(id, definition.tasks, ctx);

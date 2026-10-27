@@ -138,7 +138,7 @@ beforeEach(async () => {
 			await Container.get(SkillRepository).createSkill(
 				{
 					id,
-					target: { projectId: null, agentId: agent.id },
+					target: { projectId: sourceProject.id },
 					source: 'agent',
 					createdById: owner.id,
 				},
@@ -159,6 +159,8 @@ beforeEach(async () => {
 afterEach(async () => {
 	vi.restoreAllMocks();
 	await agents.delete({});
+	// Skills belong to projects and outlive their agents.
+	await Container.get(SkillRepository).delete({});
 	await Container.get(DataTableService).deleteDataTableAll();
 	await testDb.truncate([
 		'WorkflowEntity',
@@ -289,6 +291,7 @@ it.each(['loose', 'project'] as const)(
 			sourceAgents.map(async (agent) => await skillRefs.readDraft(agent, {})),
 		);
 		await agents.delete({ projectId: sourceProject.id });
+		await Container.get(SkillRepository).delete({ projectId: sourceProject.id });
 		await Container.get(WorkflowRepository).delete(workflow.id);
 		if (shape === 'project') {
 			await Container.get(ProjectRepository).delete(sourceProject.id);
@@ -428,6 +431,7 @@ it.each([
 		dependencyPolicy: 'reference-only',
 	});
 	await agents.delete({ projectId: sourceProject.id });
+	await Container.get(SkillRepository).delete({ projectId: sourceProject.id });
 	if (state === 'missing-agent') await agents.delete(existingChild.id);
 	if (state === 'inaccessible-agent')
 		await agents.update(existingChild.id, { projectId: sourceProject.id });
@@ -531,6 +535,7 @@ it('imports an Agent dependency chain through a child Agent and nested workflows
 	await agents.save(child);
 	const archive = await download();
 	await agents.delete({ projectId: sourceProject.id });
+	await Container.get(SkillRepository).delete({ projectId: sourceProject.id });
 	await Container.get(WorkflowRepository).delete([workflow.id, nested.id]);
 	await Container.get(CredentialsRepository).delete(credential.id);
 	const response = await upload(archive, { credentialMissingMode: 'create-stub' });
@@ -631,6 +636,7 @@ it.each(['create', 'missing-credential', 'missing-table', 'missing-variable'] as
 		await agents.save(agent);
 		const archive = await download();
 		await agents.delete({ projectId: sourceProject.id });
+		await Container.get(SkillRepository).delete({ projectId: sourceProject.id });
 		await Container.get(CredentialsRepository).delete(credential.id);
 		await tables.deleteDataTable(table.id, sourceProject.id);
 		await Container.get(VariablesRepository).delete(variable.id);
@@ -697,6 +703,7 @@ it('shares conflict, ID, and publication policies across mixed content', async (
 	const workflow = await addWorkflowDependency();
 	const archive = await download();
 	await agents.delete({ projectId: sourceProject.id });
+	await Container.get(SkillRepository).delete({ projectId: sourceProject.id });
 	await Container.get(WorkflowRepository).delete(workflow.id);
 	const created = await upload(archive, {
 		publishingPolicy: 'publish-all',
@@ -754,6 +761,7 @@ it('shares conflict, ID, and publication policies across mixed content', async (
 it('imports with Agent-only grants and skips with no write grants', async () => {
 	const archive = await download();
 	await agents.delete({ projectId: sourceProject.id });
+	await Container.get(SkillRepository).delete({ projectId: sourceProject.id });
 	const member = await createMemberWithApiKey({
 		scopes: ['agent:import', 'agent:read', 'agent:create'],
 	});
@@ -781,6 +789,7 @@ it.each(['read', 'create', 'update', 'publish', 'unpublish'] as const)(
 	async (action) => {
 		const archive = await download();
 		await agents.delete({ projectId: sourceProject.id });
+		await Container.get(SkillRepository).delete({ projectId: sourceProject.id });
 		if (action === 'update' || action === 'unpublish') {
 			expect((await upload(archive, { publishingPolicy: 'publish-all' })).statusCode).toBe(200);
 		}
@@ -808,6 +817,7 @@ it.each(['project:viewer', 'project:chatUser'] as const)(
 	async (role) => {
 		const archive = await download();
 		await agents.delete({ projectId: sourceProject.id });
+		await Container.get(SkillRepository).delete({ projectId: sourceProject.id });
 		const member = await createMemberWithApiKey({
 			scopes: ['agent:import', 'agent:read', 'agent:create'],
 		});
@@ -835,6 +845,7 @@ it.each(['agent:import', 'workflow:import'] as const)(
 
 it('reports a blocked plan without creating the destination project', async () => {
 	await agents.delete({ projectId: sourceProject.id });
+	await Container.get(SkillRepository).delete({ projectId: sourceProject.id });
 	const fixture = projectAgentsFixture();
 	delete fixture.manifest.requirements;
 	const entry = fixture.manifest.agents[0];
@@ -861,6 +872,7 @@ it('returns saved definitions and continues when one publication fails', async (
 	await agents.save(sourceAgents[0]);
 	const archive = await download();
 	await agents.delete({ projectId: sourceProject.id });
+	await Container.get(SkillRepository).delete({ projectId: sourceProject.id });
 	const response = await upload(archive, { publishingPolicy: 'publish-all' });
 	expect(response.statusCode).toBe(200);
 	const result = ImportResultDto.parse(response.body);

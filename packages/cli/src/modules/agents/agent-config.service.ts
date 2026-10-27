@@ -151,7 +151,7 @@ export class AgentConfigService {
 				agent,
 				incomingSkillRefs,
 				content.skills,
-				user.id,
+				user,
 				ctx,
 			);
 			const tasksChanged = await this.agentTaskRepository.replaceForAgent(

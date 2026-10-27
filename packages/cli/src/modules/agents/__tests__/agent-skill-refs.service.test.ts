@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/unbound-method -- mock-based tests reference unbound methods */
 import type { AgentJsonSkillConfig } from '@n8n/api-types';
 import type { OperationContext, User } from '@n8n/db';
+import { ConflictError, ForbiddenError } from '@n8n/errors';
 import type { Mocked } from 'vitest';
 import { mock } from 'vitest-mock-extended';
 
@@ -25,7 +26,7 @@ const agent = { id: 'agent-1', projectId: 'project-1', schema: baseConfig } as u
 
 function row(skillId: string, versionId: string, name: string): ResolvedSkillRow {
 	return {
-		skill: mock<Skill>({ id: skillId, agentId: null }),
+		skill: mock<Skill>({ id: skillId }),
 		version: mock<SkillVersion>({
 			id: versionId,
 			skillId,
@@ -314,11 +315,13 @@ describe('AgentSkillRefsService', () => {
 		beforeEach(() => {
 			agentSkillUsage.checkRefs.mockImplementation(async (_agent, refs) => refs);
 			skillService.create.mockResolvedValue('skill_created');
+			skillService.freeNames.mockImplementation(async (names) => names);
+			skillRepository.findLatestSummaries.mockResolvedValue(new Map());
 			vi.mocked(userHasScopes).mockResolvedValue(true);
 		});
 
-		it('keeps refs to hub skills and creates agent skills for refs with only a body', async () => {
-			skillRepository.findByIds.mockResolvedValue([mock<Skill>({ id: 'shared', agentId: null })]);
+		it('keeps refs to hub skills and creates project skills for refs with only a body', async () => {
+			skillRepository.findByIds.mockResolvedValue([mock<Skill>({ id: 'shared' })]);
 
 			const refs = await service.createDraftRefs(
 				agent,
@@ -335,7 +338,7 @@ describe('AgentSkillRefsService', () => {
 			expect(skillService.create).toHaveBeenCalledTimes(1);
 			expect(skillService.create).toHaveBeenCalledWith(
 				{
-					target: { projectId: null, agentId: 'agent-1' },
+					target: { projectId: 'project-1' },
 					skill: body,
 					source: 'agent',
 					createdById: 'user-1',
@@ -354,9 +357,9 @@ describe('AgentSkillRefsService', () => {
 			);
 		});
 
-		it('creates an agent skill without a project skill scope', async () => {
+		it('refuses to create a project skill without the skill create permission there', async () => {
 			skillRepository.findByIds.mockResolvedValue([]);
-			vi.mocked(userHasScopes).mockResolvedValue(false);
+			skillService.assertCanCreate.mockRejectedValue(new ForbiddenError('No'));
 
 			await expect(
 				service.createDraftRefs(
@@ -366,67 +369,67 @@ describe('AgentSkillRefsService', () => {
 					user,
 					ctx,
 				),
-			).resolves.toEqual([{ type: 'skill', id: 'skill_created' }]);
-			// The skill is part of the agent, so the agent permission of the caller is enough.
-			expect(userHasScopes).not.toHaveBeenCalled();
+			).rejects.toThrow(ForbiddenError);
+			expect(skillService.assertCanCreate).toHaveBeenCalledWith(user, { projectId: 'project-1' });
+			expect(skillService.create).not.toHaveBeenCalled();
 		});
 
 		it('needs no skill permission for refs to hub skills', async () => {
-			skillRepository.findByIds.mockResolvedValue([mock<Skill>({ id: 'shared', agentId: null })]);
-			vi.mocked(userHasScopes).mockResolvedValue(false);
+			skillRepository.findByIds.mockResolvedValue([mock<Skill>({ id: 'shared' })]);
 
 			await expect(
 				service.createDraftRefs(agent, [{ type: 'skill', id: 'shared' }], {}, user, ctx),
 			).resolves.toEqual([{ type: 'skill', id: 'shared' }]);
-			expect(userHasScopes).not.toHaveBeenCalled();
+			expect(skillService.assertCanCreate).not.toHaveBeenCalled();
 		});
 
-		it('copies a skill of another agent only for the new agent', async () => {
-			skillRepository.findByIds.mockResolvedValue([
-				mock<Skill>({ id: 'private', agentId: 'agent-source' }),
-			]);
-			agentSkillRepository.findAgents.mockResolvedValue(
-				new Map([['agent-source', { name: 'Source', projectId: 'project-1' }]]),
-			);
-			skillService.resolveForAgentDraft.mockResolvedValue({ private: body });
+		it('gives a new skill a free name in the project', async () => {
+			skillRepository.findByIds.mockResolvedValue([]);
+			skillService.freeNames.mockResolvedValue(['New 2']);
 
-			const refs = await service.createDraftRefs(
+			await service.createDraftRefs(
 				agent,
-				[{ type: 'skill', id: 'private' }],
-				{},
+				[{ type: 'skill', id: 'seed_skill' }],
+				{ seed_skill: body },
 				user,
 				ctx,
 			);
 
+			expect(skillService.freeNames).toHaveBeenCalledWith(
+				['New'],
+				{ projectId: 'project-1' },
+				ctx,
+				[],
+			);
 			expect(skillService.create).toHaveBeenCalledWith(
-				{
-					target: { projectId: null, agentId: 'agent-1' },
-					skill: body,
-					source: 'agent',
-					createdById: 'user-1',
-				},
+				expect.objectContaining({ skill: { ...body, name: 'New 2' } }),
 				ctx,
 			);
-			expect(refs).toEqual([{ type: 'skill', id: 'skill_created' }]);
 		});
 
-		it('does not read or copy an agent skill of another project', async () => {
-			skillRepository.findByIds.mockResolvedValue([
-				mock<Skill>({ id: 'private', agentId: 'agent-elsewhere' }),
-			]);
-			agentSkillRepository.findAgents.mockResolvedValue(
-				new Map([['agent-elsewhere', { name: 'Elsewhere', projectId: 'project-2' }]]),
+		it('gives a new skill a name that differs from the skills the draft keeps', async () => {
+			skillRepository.findByIds.mockResolvedValue([mock<Skill>({ id: 'shared' })]);
+			skillRepository.findLatestSummaries.mockResolvedValue(
+				new Map([['shared', { name: 'New', description: 'Shared', version: 1 }]]),
 			);
 
-			await service.createDraftRefs(agent, [{ type: 'skill', id: 'private' }], {}, user, ctx);
-
-			expect(skillService.resolveForAgentDraft).not.toHaveBeenCalled();
-			expect(skillService.create).not.toHaveBeenCalled();
-			// The ref stays a plain ref, so the attach check refuses it.
-			expect(agentSkillUsage.checkRefs).toHaveBeenCalledWith(
-				{ id: 'agent-1', projectId: 'project-1' },
-				[{ id: 'private' }],
+			await service.createDraftRefs(
+				agent,
+				[
+					{ type: 'skill', id: 'shared' },
+					{ type: 'skill', id: 'seed_skill' },
+				],
+				{ seed_skill: body },
+				user,
 				ctx,
+			);
+
+			expect(skillRepository.findLatestSummaries).toHaveBeenCalledWith(['shared'], ctx);
+			expect(skillService.freeNames).toHaveBeenCalledWith(
+				['New'],
+				{ projectId: 'project-1' },
+				ctx,
+				['New'],
 			);
 		});
 
@@ -446,11 +449,77 @@ describe('AgentSkillRefsService', () => {
 		});
 	});
 
+	describe('importDraftSkills', () => {
+		const body = { name: 'Imported', description: 'Imported description', instructions: 'Do it.' };
+		const user = mock<User>({ id: 'user-1' });
+		const refs = [{ type: 'skill' as const, id: 'pkg_skill' }];
+
+		beforeEach(() => {
+			agentSkillUsage.checkRefs.mockImplementation(async (_agent, checked) => checked);
+			skillService.create.mockResolvedValue('pkg_skill');
+		});
+
+		it('creates a new skill with its package id in the project of the agent', async () => {
+			skillRepository.findByIds.mockResolvedValue([]);
+
+			await expect(
+				service.importDraftSkills(agent, refs, { pkg_skill: body }, user, ctx),
+			).resolves.toEqual([{ type: 'skill', id: 'pkg_skill' }]);
+
+			expect(skillService.assertCanCreate).toHaveBeenCalledWith(user, { projectId: 'project-1' });
+			expect(skillService.create).toHaveBeenCalledWith(
+				{
+					id: 'pkg_skill',
+					target: { projectId: 'project-1' },
+					skill: body,
+					source: 'agent',
+					createdById: 'user-1',
+				},
+				ctx,
+			);
+		});
+
+		it('refuses a new skill without the create permission in the project', async () => {
+			skillRepository.findByIds.mockResolvedValue([]);
+			skillService.assertCanCreate.mockRejectedValue(new ForbiddenError('No'));
+
+			await expect(
+				service.importDraftSkills(agent, refs, { pkg_skill: body }, user, ctx),
+			).rejects.toThrow(ForbiddenError);
+			expect(skillService.create).not.toHaveBeenCalled();
+		});
+
+		it.each([
+			['another project', 'project-2'],
+			['the instance', null],
+		])('refuses a skill id of %s and writes nothing', async (_label, projectId) => {
+			skillRepository.findByIds.mockResolvedValue([mock<Skill>({ id: 'pkg_skill', projectId })]);
+
+			await expect(
+				service.importDraftSkills(agent, refs, { pkg_skill: body }, user, ctx),
+			).rejects.toThrow(ConflictError);
+			expect(agentSkillRepository.replaceDependencies).not.toHaveBeenCalled();
+			expect(skillService.save).not.toHaveBeenCalled();
+		});
+
+		it('refuses to change a skill of the project that the user cannot edit', async () => {
+			skillRepository.findByIds.mockResolvedValue([
+				mock<Skill>({ id: 'pkg_skill', projectId: 'project-1' }),
+			]);
+			skillService.assertCanEdit.mockRejectedValue(new ForbiddenError('No'));
+
+			await expect(
+				service.importDraftSkills(agent, refs, { pkg_skill: body }, user, ctx),
+			).rejects.toThrow(ForbiddenError);
+			expect(skillService.assertCanEdit).toHaveBeenCalledWith(user, ['pkg_skill'], ctx);
+			expect(skillService.save).not.toHaveBeenCalled();
+		});
+	});
+
 	describe('createSkills', () => {
 		it.each([
-			['project', { projectId: 'project-1', agentId: null }],
-			['agent', { projectId: null, agentId: 'agent-1' }],
-			['instance', { projectId: null, agentId: null }],
+			['project', { projectId: 'project-1' }],
+			['instance', { projectId: null }],
 		] as const)('creates a hub skill available to %s', async (availableTo, target) => {
 			const body = { name: 'New', description: 'New description', instructions: 'Do it.' };
 			skillService.create.mockResolvedValue('skill_created');
@@ -479,11 +548,11 @@ describe('AgentSkillRefsService', () => {
 
 	describe('setAvailability', () => {
 		it('moves the skill to the target of the choice, keeping this agent', async () => {
-			await service.setAvailability(agent, 'skill_a', 'agent', ctx);
+			await service.setAvailability(agent, 'skill_a', 'instance', ctx);
 
 			expect(skillService.changeTarget).toHaveBeenCalledWith(
 				'skill_a',
-				{ projectId: null, agentId: 'agent-1' },
+				{ projectId: null },
 				'agent-1',
 				ctx,
 				{},
@@ -497,7 +566,7 @@ describe('AgentSkillRefsService', () => {
 
 			expect(skillService.changeTarget).toHaveBeenCalledWith(
 				'skill_a',
-				{ projectId: agent.projectId, agentId: null },
+				{ projectId: agent.projectId },
 				'agent-1',
 				ctx,
 				{ nameAfterMove: 'Condense' },
