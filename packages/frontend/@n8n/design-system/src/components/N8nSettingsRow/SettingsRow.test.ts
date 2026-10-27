@@ -4,6 +4,17 @@ import { nextTick } from 'vue';
 import N8nSettingsRow from './SettingsRow.vue';
 
 describe('N8nSettingsRow', () => {
+	it('renders trailing content beside the title', () => {
+		render(N8nSettingsRow, {
+			props: { title: 'Enable Chat' },
+			slots: { titleTrailing: '<span data-test-id="status-badge">Preview</span>' },
+		});
+
+		expect(screen.getByText('Enable Chat').parentElement).toContainElement(
+			screen.getByTestId('status-badge'),
+		);
+	});
+
 	it('renders title and description', () => {
 		render(N8nSettingsRow, {
 			props: { title: 'My setting', description: 'What it does' },

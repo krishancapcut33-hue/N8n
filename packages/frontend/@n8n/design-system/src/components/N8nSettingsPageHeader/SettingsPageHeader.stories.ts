@@ -100,6 +100,21 @@ export const WithoutDocsLink: Story = {
 	},
 };
 
+export const WithFeatureBadges: Story = {
+	render: (args) => ({
+		components: { N8nSettingsPageHeader },
+		setup: () => ({ args }),
+		template: frame('<N8nSettingsPageHeader v-bind="args" />'),
+	}),
+	args: {
+		title: 'Context',
+		description: 'Preferences and skills the assistant can use.',
+		feature: 'context',
+		showBadges: true,
+		showDocsLink: false,
+	},
+};
+
 export const TitleOnly: Story = {
 	render: (args) => ({
 		components: { N8nSettingsPageHeader },

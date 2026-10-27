@@ -3,6 +3,7 @@ import { useI18n } from '../../composables/useI18n';
 import N8nBadge from '../N8nBadge';
 import type { BadgeSize } from '../N8nBadge/Badge.type';
 
+// `N8nFeatureMaturityBadges` is the only caller. A lint rule blocks other Vue files.
 defineOptions({ name: 'N8nPreviewBadge' });
 
 withDefaults(
