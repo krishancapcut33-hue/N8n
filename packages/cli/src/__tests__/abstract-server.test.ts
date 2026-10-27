@@ -1,3 +1,5 @@
+import { ModuleRegistry } from '@n8n/backend-common';
+import { AppsHostingService } from '@n8n/backend-module-apps/hosting';
 import { GlobalConfig } from '@n8n/config';
 import { DbConnection } from '@n8n/db';
 import { Container } from '@n8n/di';
@@ -6,6 +8,7 @@ import type * as http from 'node:http';
 import { mock } from 'vitest-mock-extended';
 
 import { AbstractServer } from '@/abstract-server';
+import { ControllerRegistry } from '@/controller.registry';
 import { ExternalHooks } from '@/external-hooks';
 import { LiveWebhooks } from '@/webhooks/live-webhooks';
 import { SlackInteractionWebhooks } from '@/webhooks/slack-interaction-webhooks';
@@ -13,6 +16,9 @@ import { TelegramInteractionWebhooks } from '@/webhooks/telegram-interaction-web
 import { WaitingForms } from '@/webhooks/waiting-forms';
 import { WaitingWebhooks } from '@/webhooks/waiting-webhooks';
 import { createWebhookHandlerFor } from '@/webhooks/webhook-request-handler';
+
+vi.mock('@n8n/backend-module-apps/hosting', () => ({ AppsHostingService: vi.fn() }));
+vi.mock('@/controller.registry', () => ({ ControllerRegistry: vi.fn() }));
 
 vi.mock('@/webhooks/webhook-request-handler', () => ({
 	createWebhookHandlerFor: vi.fn(),
@@ -35,14 +41,20 @@ class TestServer extends AbstractServer {
 	async configure() {}
 }
 
-describe('AbstractServer health endpoints', () => {
+describe('AbstractServer', () => {
+	const moduleRegistry = mock<ModuleRegistry>({ eligibleModules: [] });
 	let testServer: TestServer;
 	let healthHandler: (req: express.Request, res: express.Response) => void;
 	let readinessHandler: (req: express.Request, res: express.Response) => void;
 	let dbConnection: DbConnection;
 
-	beforeEach(async () => {
+	beforeEach(() => {
 		vi.restoreAllMocks();
+		vi.clearAllMocks();
+		vi.stubEnv('N8N_APPS_BASE_URL', '');
+		moduleRegistry.eligibleModules.length = 0;
+		moduleRegistry.isActive.mockReturnValue(false);
+		Container.set(ModuleRegistry, moduleRegistry);
 
 		mockServer.listen.mockImplementation((...args: unknown[]) => {
 			const callback = args.find((arg) => typeof arg === 'function');
@@ -79,6 +91,10 @@ describe('AbstractServer health endpoints', () => {
 		});
 		Container.set(GlobalConfig, globalConfig);
 		Container.set(ExternalHooks, mock<ExternalHooks>());
+		Container.set(LiveWebhooks, mock<LiveWebhooks>());
+		Container.set(WaitingWebhooks, mock<WaitingWebhooks>());
+		Container.set(SlackInteractionWebhooks, mock<SlackInteractionWebhooks>());
+		Container.set(TelegramInteractionWebhooks, mock<TelegramInteractionWebhooks>());
 
 		mockApp.get.mockImplementation((...args: unknown[]) => {
 			const [path, handler] = args as [
@@ -94,18 +110,91 @@ describe('AbstractServer health endpoints', () => {
 		});
 
 		testServer = new TestServer();
-		await testServer.init();
+	});
+
+	afterEach(() => vi.unstubAllEnvs());
+
+	describe('apps startup', () => {
+		const router = mock<express.Router>();
+		const hosting = mock<AppsHostingService>({ router });
+		const controllers = mock<ControllerRegistry>();
+
+		beforeEach(() => {
+			Container.set(AppsHostingService, hosting);
+			Container.set(ControllerRegistry, controllers);
+			Container.set(WaitingForms, mock<WaitingForms>());
+		});
+
+		it('activates apps controllers on the apps router', async () => {
+			moduleRegistry.eligibleModules.push('apps');
+			moduleRegistry.isActive.mockReturnValue(true);
+
+			await testServer.init();
+
+			expect(mockApp.use).toHaveBeenNthCalledWith(1, hosting.dispatch);
+
+			await testServer.start();
+
+			expect(moduleRegistry.isActive).toHaveBeenCalledWith('apps');
+			expect(router.use).toHaveBeenCalledOnce();
+			expect(controllers.activate).toHaveBeenCalledExactlyOnceWith(router, {
+				surface: 'apps',
+			});
+		});
+
+		it.each([false, true])(
+			'returns 503 until the server is ready when the apps module is active: %s',
+			async (active) => {
+				vi.stubEnv('N8N_APPS_BASE_URL', 'https://apps.example.com');
+				moduleRegistry.isActive.mockReturnValue(active);
+				await testServer.init();
+
+				expect(router.use.mock.invocationCallOrder[0]).toBeLessThan(
+					mockServer.listen.mock.invocationCallOrder[0],
+				);
+				const gate = router.use.mock.calls[0][0] as unknown as express.RequestHandler;
+				const req = mock<express.Request>();
+				const res = mock<express.Response>();
+				const next = vi.fn();
+				await gate(req, res, next);
+				expect(res.sendStatus).toHaveBeenCalledExactlyOnceWith(503);
+				expect(next).not.toHaveBeenCalled();
+
+				const healthResponse = mock<express.Response>();
+				healthHandler(req, healthResponse);
+				expect(healthResponse.send).toHaveBeenCalledWith({ status: 'ok' });
+
+				await testServer.start();
+				await gate(req, res, next);
+				expect(res.sendStatus).toHaveBeenCalledTimes(2);
+				expect(next).not.toHaveBeenCalled();
+
+				testServer.markAsReady();
+				await gate(req, res, next);
+				expect(res.sendStatus).toHaveBeenCalledTimes(2);
+				expect(next).toHaveBeenCalledExactlyOnceWith();
+			},
+		);
+
+		it('reserves configured app hosts without activating an inactive module', async () => {
+			vi.stubEnv('N8N_APPS_BASE_URL', 'https://apps.example.com');
+
+			await testServer.init();
+			await testServer.start();
+
+			expect(mockApp.use).toHaveBeenNthCalledWith(1, hosting.dispatch);
+			expect(moduleRegistry.isActive).toHaveBeenCalledWith('apps');
+			expect(router.use).toHaveBeenCalledOnce();
+			expect(controllers.activate).not.toHaveBeenCalled();
+		});
 	});
 
 	describe('webhook route registration', () => {
 		it('should register the waiting-forms route with the form sandbox family', async () => {
 			const waitingForms = mock<WaitingForms>();
-			Container.set(LiveWebhooks, mock<LiveWebhooks>());
 			Container.set(WaitingForms, waitingForms);
-			Container.set(WaitingWebhooks, mock<WaitingWebhooks>());
-			Container.set(SlackInteractionWebhooks, mock<SlackInteractionWebhooks>());
-			Container.set(TelegramInteractionWebhooks, mock<TelegramInteractionWebhooks>());
 
+			await testServer.init();
 			await testServer.start();
 
 			expect(createWebhookHandlerFor).toHaveBeenCalledWith(waitingForms, undefined, 'form');
@@ -113,6 +202,8 @@ describe('AbstractServer health endpoints', () => {
 	});
 
 	describe('/healthz (liveness)', () => {
+		beforeEach(async () => await testServer.init());
+
 		it('should return 200 regardless of fullyReady flag', () => {
 			const res = mock<express.Response>();
 			healthHandler(mock<express.Request>(), res);
@@ -121,6 +212,8 @@ describe('AbstractServer health endpoints', () => {
 	});
 
 	describe('/healthz/readiness', () => {
+		beforeEach(async () => await testServer.init());
+
 		it('should return 503 before markAsReady() is called', () => {
 			const res = mock<express.Response>();
 			res.status.mockReturnValue(res);

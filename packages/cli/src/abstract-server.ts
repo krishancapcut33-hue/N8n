@@ -1,4 +1,5 @@
-import { inDevelopment, inTest, Logger } from '@n8n/backend-common';
+import { inDevelopment, inTest, Logger, ModuleRegistry } from '@n8n/backend-common';
+import type { AppsHostingService } from '@n8n/backend-module-apps/hosting';
 import { GlobalConfig } from '@n8n/config';
 import { DbConnection } from '@n8n/db';
 import { OnShutdown } from '@n8n/decorators';
@@ -6,7 +7,7 @@ import { Container, Service } from '@n8n/di';
 import compression from 'compression';
 import express from 'express';
 import { readFile } from 'fs/promises';
-import type { Server } from 'http';
+import type { IncomingMessage, Server } from 'http';
 import isbot from 'isbot';
 import { SLACK_HITL_WEBHOOK_SUFFIX, TELEGRAM_HITL_WEBHOOK_SUFFIX } from 'n8n-core';
 
@@ -41,6 +42,11 @@ export abstract class AbstractServer {
 	protected server: Server;
 
 	readonly app: express.Application;
+
+	protected appsHosting: AppsHostingService | undefined;
+
+	protected readonly allowsUpgrade = (req: IncomingMessage) =>
+		this.appsHosting?.allowsUpgrade(req) ?? true;
 
 	protected externalHooks: ExternalHooks;
 
@@ -139,7 +145,7 @@ export abstract class AbstractServer {
 
 	protected setupPushServer() {}
 
-	/** Call once after all initialization is complete. Unblocks the /healthz/readiness endpoint. */
+	/** Call after initialization to unblock app requests and the /healthz/readiness endpoint. */
 	markAsReady() {
 		this.fullyReady = true;
 	}
@@ -189,6 +195,19 @@ export abstract class AbstractServer {
 	async init(): Promise<void> {
 		const { app, sslKey, sslCert } = this;
 		const { protocol } = this.globalConfig;
+		if (
+			Container.get(ModuleRegistry).eligibleModules.includes('apps') ||
+			process.env.N8N_APPS_BASE_URL
+		) {
+			const { AppsHostingService: Hosting } = await import('@n8n/backend-module-apps/hosting');
+			this.appsHosting = Container.get(Hosting);
+			this.appsHosting.router.use((_req, res, next) => {
+				if (this.fullyReady) next();
+				else res.sendStatus(503);
+			});
+			// Dispatch before health checks, webhooks, controllers, and editor middleware.
+			app.use(this.appsHosting.dispatch);
+		}
 
 		if (protocol === 'https' && sslKey && sslCert) {
 			const https = await import('https');
@@ -246,6 +265,12 @@ export abstract class AbstractServer {
 	}
 
 	async start(): Promise<void> {
+		if (this.appsHosting && Container.get(ModuleRegistry).isActive('apps')) {
+			const { ControllerRegistry } = await import('./controller.registry.js');
+			Container.get(ControllerRegistry).activate(this.appsHosting.router, {
+				surface: 'apps',
+			});
+		}
 		if (!inTest) {
 			await this.setupErrorHandlers();
 			this.setupPushServer();
