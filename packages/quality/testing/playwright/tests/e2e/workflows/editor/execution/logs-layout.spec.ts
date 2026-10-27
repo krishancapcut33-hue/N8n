@@ -130,3 +130,90 @@ test.describe(
 		});
 	},
 );
+
+test.describe(
+	'Logs panel header actions',
+	{ annotation: [{ type: 'owner', description: 'Lifecycle & Governance' }] },
+	() => {
+		test('should separate header buttons and match the chat reset button size', async ({
+			n8n,
+			api,
+		}) => {
+			const workflow = await api.workflows.createWorkflow({
+				name: `Logs header actions ${nanoid()}`,
+				nodes: [
+					{
+						id: nanoid(),
+						name: 'Chat',
+						type: '@n8n/n8n-nodes-langchain.chatTrigger',
+						typeVersion: 1.3,
+						position: [240, 300],
+						parameters: { options: {} },
+					},
+					{
+						id: nanoid(),
+						name: 'Output',
+						type: 'n8n-nodes-base.noOp',
+						typeVersion: 1,
+						position: [480, 300],
+						parameters: {},
+					},
+				],
+				connections: {
+					Chat: { main: [[{ node: 'Output', type: 'main', index: 0 }]] },
+				},
+			});
+
+			try {
+				await n8n.start.fromExistingWorkflow(workflow.id);
+				const logs = n8n.canvas.logsPanel;
+				await logs.open();
+				await logs.sendManualChatMessage('Check header spacing');
+				await expect(logs.getOverviewStatus()).toContainText('Success in');
+				await expect(logs.getSelectedLogEntry()).toContainText('Output');
+
+				// Deselect the output so all three actions share the overview header.
+				await logs.getSelectedLogEntry().click();
+				await expect(logs.getSelectedLogEntry()).toHaveCount(0);
+				await expect(logs.getClearExecutionButton()).toBeVisible();
+				const buttons = logs.getOverviewHeaderButtons();
+				await expect(buttons).toHaveCount(3);
+				const resetSession = logs.getRefreshSessionButton();
+				await expect(resetSession).toBeVisible();
+				const resetSize = await resetSession.evaluate((button) => {
+					const { width, height } = button.getBoundingClientRect();
+					return { width, height };
+				});
+
+				// LIGO-507: Measure button boxes, not the space inside each button.
+				for (const [index, name] of ['Clear execution', 'Actions', 'Collapse'].entries()) {
+					await expect
+						.soft(buttons.nth(index), `${name} must match the chat reset height`)
+						.toHaveCSS('height', `${resetSize.height}px`);
+				}
+				for (const [index, name] of ['Actions', 'Collapse'].entries()) {
+					const buttonIndex = index + 1;
+					await buttons.nth(buttonIndex).hover();
+					const layout = await buttons.evaluateAll((elements) =>
+						elements.map((element) => {
+							const { left, right, width } = element.getBoundingClientRect();
+							return { left, right, width };
+						}),
+					);
+					expect
+						.soft(layout[buttonIndex].width, `${name} must match the chat reset width`)
+						.toBe(resetSize.width);
+					expect
+						.soft(
+							layout[buttonIndex].left - layout[index].right,
+							`${name} must have a visible gap from the previous button on hover`,
+						)
+						.toBeGreaterThan(0);
+				}
+			} finally {
+				await api.workflows.archive(workflow.id);
+				await api.workflows.delete(workflow.id);
+			}
+		});
+	},
+);

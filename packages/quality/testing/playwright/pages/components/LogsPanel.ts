@@ -35,6 +35,10 @@ export class LogsPanel {
 		return this.root.getByTestId('logs-overview-header');
 	}
 
+	getOverviewHeaderButtons(): Locator {
+		return this.getOverviewHeader().getByRole('button');
+	}
+
 	getChatHeader(): Locator {
 		return this.root.getByTestId('chat-header');
 	}
