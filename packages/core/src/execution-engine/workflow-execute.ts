@@ -61,6 +61,7 @@ import {
 	ManualExecutionCancelledError,
 	createRunExecutionData,
 	applyDynamicCredentialsUsage,
+	hasExecutionRunNodes,
 } from 'n8n-workflow';
 import PCancelable, { type OnCancelFunction } from 'p-cancelable';
 
@@ -1582,7 +1583,16 @@ export class WorkflowExecute {
 			pinDataNodeNames,
 		});
 		if (workflowIssues !== null) {
+			this.markFailedBeforeStart();
 			throw new WorkflowHasIssuesError(workflowIssues, workflow.nodes);
+		}
+	}
+
+	private markFailedBeforeStart(): void {
+		const { resultData } = this.runExecutionData;
+		const isResume = this.additionalData.restartExecutionId !== undefined;
+		if (!hasExecutionRunNodes(resultData.runData, isResume)) {
+			resultData.failedBeforeStart = true;
 		}
 	}
 
@@ -1701,6 +1711,10 @@ export class WorkflowExecute {
 		} catch (error) {
 			const e = error as unknown as ExecutionBaseError;
 
+			// Read before the start-node task below fills `runData`.
+			this.markFailedBeforeStart();
+			const { failedBeforeStart } = this.runExecutionData.resultData;
+
 			// Set the error that it can be saved correctly
 			const executionError: ExecutionBaseError = {
 				...e,
@@ -1731,6 +1745,7 @@ export class WorkflowExecute {
 					},
 					lastNodeExecuted: startItem.node.name,
 					error: executionError,
+					...(failedBeforeStart && { failedBeforeStart }),
 				};
 			} else {
 				this.runExecutionData.resultData.error = executionError;
