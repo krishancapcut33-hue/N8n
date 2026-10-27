@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { N8nMarkdown } from '@n8n/design-system';
+import ChatMarkdown from '@/features/ai/shared/components/ChatMarkdown/ChatMarkdown.vue';
 import { inject } from 'vue';
 import { useRouter } from 'vue-router';
 import { resolveAgentPreviewLink } from '../utils/agentPreviewUrl';
@@ -38,5 +38,5 @@ function handleLinkClick(event: MouseEvent) {
 </script>
 
 <template>
-	<N8nMarkdown :content="source" @click="handleLinkClick" />
+	<ChatMarkdown :content="source" @click="handleLinkClick" />
 </template>

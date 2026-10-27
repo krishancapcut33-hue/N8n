@@ -7,16 +7,11 @@ import type { ResourceEntry } from '../useResourceRegistry';
 import { computed } from 'vue';
 import { INSTANCE_AI_EMBED_SUBJECT_KEY } from '../embed/instanceAiEmbed.types';
 
-// Stub ChatMarkdownChunk to expose the processed content. v-html mirrors the
-// real component (VueMarkdown renders via innerHTML): plain text stays plain
-// text for the decoration assertions, HTML content produces real anchors for
-// the link-enhancement tests, and unchanged content leaves the DOM untouched
-// across re-renders — exactly like production.
-vi.mock('@/features/ai/chatHub/components/ChatMarkdownChunk.vue', () => ({
+/** Expose processed text and anchors to test resource decoration and delegated clicks. */
+vi.mock('@/features/ai/shared/components/ChatMarkdown/ChatMarkdown.vue', () => ({
 	default: {
-		template:
-			'<div data-test-id="markdown-output" :data-source-type="source.type" v-html="source.type === \'text\' ? source.content : source.command?.title"></div>',
-		props: ['source'],
+		template: '<div data-test-id="markdown-output" v-html="content"></div>',
+		props: ['content'],
 	},
 }));
 
@@ -250,6 +245,16 @@ describe('InstanceAiMarkdown', () => {
 			expect(link.target).toBe('_blank');
 		});
 
+		it('keeps one icon when the shared renderer supplies an icon', () => {
+			const { getByTestId } = renderComponent({
+				props: { content: '<a href="/workflow/wf-1"><svg></svg>Workflow</a>' },
+			});
+			const link = getByTestId('markdown-output').querySelector('a');
+
+			expect(link?.dataset.resourceChip).toBe('workflow');
+			expect(link?.querySelectorAll('svg')).toHaveLength(1);
+		});
+
 		it('should open the canvas preview on left-click and suppress navigation', () => {
 			const openWorkflowPreview = vi.fn(() => true);
 			const { link } = renderWithPreview(openWorkflowPreview);
@@ -412,7 +417,7 @@ describe('InstanceAiMarkdown', () => {
 			return getByTestId('markdown-output');
 		}
 
-		it('should render the subject agent name as plain text', () => {
+		it('should decorate the subject agent name as a resource', () => {
 			const registry = makeRegistry([
 				{ type: 'agent', id: 'agent-1', name: 'Simple Triggered Assistant' },
 				{ type: 'workflow', id: 'wf-1', name: 'Trigger Workflow' },
@@ -422,17 +427,22 @@ describe('InstanceAiMarkdown', () => {
 
 			const output = renderInEmbed('I saved Simple Triggered Assistant and built Trigger Workflow');
 
-			expect(output.textContent).not.toContain('n8n-resource://agent/agent-1');
+			expect(output.textContent).toContain(
+				'[Simple Triggered Assistant](n8n-resource://agent/agent-1)',
+			);
 			expect(output.textContent).toContain('[Trigger Workflow](n8n-resource://workflow/wf-1)');
 		});
 
 		it.each([
 			'<a href="n8n-resource://agent/agent-1">Simple Triggered Assistant</a>',
 			'<a href="/projects/project-1/agents/agent-1">Simple Triggered Assistant</a>',
-		])('should unwrap links to the subject agent: %s', (content) => {
+		])('should keep the resource icon for the subject agent: %s', (content) => {
 			const output = renderInEmbed(content);
 
-			expect(output.querySelector('a')).toBeNull();
+			const link = output.querySelector('a');
+			expect(link?.dataset.resourceChip).toBe('agent');
+			expect(link?.getAttribute('href')).toBeTruthy();
+			expect(link?.querySelector('svg')).not.toBeNull();
 			expect(output.textContent).toBe('Simple Triggered Assistant');
 		});
 

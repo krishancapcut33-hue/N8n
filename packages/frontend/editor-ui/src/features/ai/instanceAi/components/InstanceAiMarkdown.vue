@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import ChatMarkdownChunk from '@/features/ai/chatHub/components/ChatMarkdownChunk.vue';
+import ChatMarkdown from '@/features/ai/shared/components/ChatMarkdown/ChatMarkdown.vue';
 import {
 	buildAgentPreviewHref,
 	resolveAgentPreviewLink,
@@ -7,7 +7,6 @@ import {
 } from '@/features/agents/utils/agentPreviewUrl';
 import { computed, inject, onMounted, onUpdated, ref, useCssModule } from 'vue';
 import { useThread } from '../instanceAi.store';
-import { INSTANCE_AI_EMBED_SUBJECT_KEY, isEmbedSubject } from '../embed/instanceAiEmbed.types';
 
 const props = defineProps<{
 	content: string;
@@ -47,11 +46,6 @@ const openAgentChatPreview = inject<((id: string, projectId: string) => boolean)
 	'openAgentChatPreview',
 	undefined,
 );
-const embedSubject = inject(INSTANCE_AI_EMBED_SUBJECT_KEY, undefined);
-
-function isCurrentSubject(type: string, id: string): boolean {
-	return isEmbedSubject(embedSubject?.value, type, id);
-}
 
 /** Icon SVG paths for each resource type — matches the n8n design system icons. */
 const ICON_SVGS: Record<string, string> = {
@@ -178,7 +172,7 @@ function decorateResourceNames(content: string): string {
 
 	// Build entries sorted longest-name-first to avoid partial-match conflicts
 	const entries = [...registry.values()]
-		.filter((entry) => entry.name.length >= 3 && !isCurrentSubject(entry.type, entry.id))
+		.filter((entry) => entry.name.length >= 3)
 		.sort((a, b) => b.name.length - a.name.length);
 
 	let result = content;
@@ -229,7 +223,6 @@ const INTERNAL_ROUTE_PATTERNS: Array<{ pattern: RegExp; type: string }> = [
 	{ pattern: /^\/projects\/[^/]+\/datatables(?:\/|$)/, type: 'data-table' },
 	{ pattern: /^\/projects\/[^/]+\/agents(?:\/|$)/, type: 'agent' },
 ];
-const AGENT_ROUTE_PATTERN = /^\/projects\/[^/]+\/agents\/([^/]+)\/?$/;
 const ABSOLUTE_URL_PATTERN = /^[a-z][a-z\d+.-]*:/i;
 
 function getSameOriginUrl(href: string): URL | undefined {
@@ -261,7 +254,8 @@ function applyResourceChip(link: HTMLAnchorElement, type: string): void {
 	link.classList.add(styles.resourceChip);
 
 	const iconHtml = ICON_SVGS[type];
-	if (iconHtml) {
+	/** The shared renderer can already supply the resource icon. */
+	if (iconHtml && !link.querySelector('svg')) {
 		const iconSpan = document.createElement('span');
 		iconSpan.classList.add(styles.resourceChipIcon);
 		iconSpan.innerHTML = iconHtml;
@@ -326,10 +320,6 @@ function enhanceResourceLinks(): void {
 		if (resourceMatch) {
 			const [, type, encodedId] = resourceMatch;
 			const id = decodeResourceId(encodedId);
-			if (isCurrentSubject(type, id)) {
-				link.replaceWith(...link.childNodes);
-				continue;
-			}
 
 			// Look up registry entry to find projectId for project-scoped routes.
 			// Search the name index because it contains both produced and listed
@@ -361,12 +351,6 @@ function enhanceResourceLinks(): void {
 		}
 		const internalUrl = getSameOriginUrl(href);
 		if (!internalUrl) continue;
-
-		const agentId = AGENT_ROUTE_PATTERN.exec(internalUrl.pathname)?.[1];
-		if (agentId && isCurrentSubject('agent', decodeResourceId(agentId))) {
-			link.replaceWith(...link.childNodes);
-			continue;
-		}
 
 		for (const { pattern, type } of INTERNAL_ROUTE_PATTERNS) {
 			if (pattern.test(internalUrl.pathname)) {
@@ -454,12 +438,17 @@ onUpdated(() => {
 </script>
 
 <template>
-	<div ref="wrapperRef" @click="handleLinkClick">
-		<ChatMarkdownChunk :source="source" />
+	<div ref="wrapperRef" :class="$style.markdown" @click="handleLinkClick">
+		<ChatMarkdown :content="source.content" :options="{ math: true, footnotes: 'pill' }" />
 	</div>
 </template>
 
 <style lang="scss" module>
+.markdown {
+	--n8n-markdown--font-size--base: var(--chat--font-size);
+	font-size: var(--n8n-markdown--font-size--base);
+}
+
 .resourceChip {
 	display: inline !important;
 	padding: 0 !important;
