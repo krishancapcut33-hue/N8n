@@ -186,6 +186,21 @@ export class AgentSkillRefsService {
 	}
 
 	/**
+	 * Removes the draft refs to the given skills. A skill save marks every Agent that
+	 * follows the skill as changed and captures a version of it. Call this before the
+	 * skills of an Agent are saved in its own save transaction, then attach the refs again
+	 * with `replaceAllDraftRefs`.
+	 */
+	async detachDraftRefs(agentId: string, skillIds: string[], ctx: OperationContext): Promise<void> {
+		if (skillIds.length === 0) return;
+		const detached = new Set(skillIds);
+		const current = await this.refsForDraft({ id: agentId }, ctx);
+		const kept = current.filter(({ id }) => !detached.has(id));
+		if (kept.length === current.length) return;
+		await this.writeDependencies(agentId, toServiceRefs(kept), ctx);
+	}
+
+	/**
 	 * Revert: set the refs of the agent draft to the refs of a published version,
 	 * each pinned to the version that the published version ran. This writes no
 	 * skill row and needs no skill permission.
@@ -295,56 +310,6 @@ export class AgentSkillRefsService {
 		}
 		await this.replaceDraftRefs(agent, next, ctx);
 		return toSkillRefs(next);
-	}
-
-	async importDraftSkills(
-		agent: Pick<Agent, 'id' | 'projectId' | 'schema'>,
-		refs: AgentSkillRefs,
-		bodies: Record<string, AgentSkill>,
-		creatorId: string,
-		ctx: OperationContext,
-	): Promise<AgentJsonSkillConfig[]> {
-		const imported: AgentJsonSkillConfig[] = [];
-		const ids = (refs ?? []).map(({ id }) => id);
-		await this.skillRepository.lockForEdit(ids, ctx);
-		const existing = new Map(
-			(await this.skillRepository.findByIds(ids, ctx)).map((skill) => [skill.id, skill]),
-		);
-		// Detach old refs to prevent partial Agent snapshots during skill saves.
-		await this.writeDependencies(agent.id, [], ctx);
-		for (const ref of refs ?? []) {
-			const skill = existing.get(ref.id);
-			if (skill) {
-				if (skill.agentId !== agent.id || skill.projectId !== null) {
-					throw new ConflictError('Imported skill ID belongs to another agent or scope');
-				}
-				const current = await this.skillsForRefs([{ type: 'skill', id: ref.id }], ctx);
-				await this.skillService.save(
-					ref.id,
-					{
-						...bodies[ref.id],
-						references: bodies[ref.id].references ?? [],
-						baseSkillHash: getAgentSkillHash(current[ref.id]),
-					},
-					creatorId,
-					ctx,
-				);
-			} else {
-				await this.skillService.create(
-					{
-						id: ref.id,
-						target: { projectId: null, agentId: agent.id },
-						skill: bodies[ref.id],
-						source: 'agent',
-						createdById: creatorId,
-					},
-					ctx,
-				);
-			}
-			imported.push({ type: 'skill', id: ref.id });
-		}
-		await this.replaceDraftRefs(agent, imported, ctx);
-		return imported;
 	}
 
 	async createSkills(
