@@ -19,7 +19,7 @@ import type { AgentUpdateBroadcaster } from '../agent-update-broadcaster';
 import type { ProjectAgent } from '../entities/agent.entity';
 import { composeJsonConfig } from '../json-config/agent-config-composition';
 import type { AgentRepository } from '../repositories/agent.repository';
-import type { SkillSaveResult, SkillService } from '@/modules/skills/skill.service';
+import { SkillService, type SkillSaveResult } from '@/modules/skills/skill.service';
 import type { SkillsTelemetry } from '@/modules/skills/skills-telemetry';
 import { getAgentConfigHash, getAgentSkillHash } from '../utils/agent-config-hash';
 import {
@@ -97,6 +97,8 @@ describe('AgentSkillsService', () => {
 
 		agentRepository = mock<AgentRepository>();
 		skillService = mock<SkillService>();
+		// The real rule, on top of the mocked permission checks below.
+		skillService.canCreate.mockImplementation(SkillService.prototype.canCreate);
 		skillRefs = createAgentSkillRefsService();
 		runtimeCacheService = mock<AgentRuntimeCacheService>();
 		Container.set(AgentRuntimeCacheService, runtimeCacheService);

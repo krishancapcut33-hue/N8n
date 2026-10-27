@@ -24,6 +24,10 @@ import { Skill, type SkillSource } from './skill.entity';
  */
 export type SkillTarget = { projectId: string | null; agentId: string | null };
 
+export function isSameSkillTarget(a: SkillTarget, b: SkillTarget): boolean {
+	return a.projectId === b.projectId && a.agentId === b.agentId;
+}
+
 /** One skill with one of its version rows and that row's files, sorted by path. */
 export type ResolvedSkillRow = {
 	skill: Skill;

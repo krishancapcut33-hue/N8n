@@ -166,6 +166,42 @@ describe('AgentSkillRefsService', () => {
 		});
 	});
 
+	describe('replaceAllDraftRefs', () => {
+		it('returns the saved refs when every ref exists', async () => {
+			agentSkillUsage.checkRefs.mockResolvedValue([{ id: 'zeta' }]);
+			agentSkillRepository.findDependencies.mockResolvedValue(
+				new Map([['agent-1', [{ skillId: 'zeta', versionId: null }]]]),
+			);
+
+			await expect(
+				service.replaceAllDraftRefs(agent, [{ type: 'skill', id: 'zeta' }], ctx),
+			).resolves.toEqual([{ type: 'skill', id: 'zeta' }]);
+			expect(agentSkillRepository.replaceDependencies).toHaveBeenCalledWith(
+				'agent-1',
+				[{ skillId: 'zeta', versionId: null }],
+				ctx,
+			);
+		});
+
+		it('fails when a ref points to a skill that no longer exists', async () => {
+			agentSkillUsage.checkRefs.mockResolvedValue([{ id: 'zeta' }]);
+			agentSkillRepository.findDependencies.mockResolvedValue(
+				new Map([['agent-1', [{ skillId: 'zeta', versionId: null }]]]),
+			);
+
+			await expect(
+				service.replaceAllDraftRefs(
+					agent,
+					[
+						{ type: 'skill', id: 'zeta' },
+						{ type: 'skill', id: 'gone' },
+					],
+					ctx,
+				),
+			).rejects.toThrow('Skills gone no longer exist. Plan the import again.');
+		});
+	});
+
 	describe('replaceDraftRefs', () => {
 		it('checks the refs and writes the dependency rows', async () => {
 			agentSkillUsage.checkRefs.mockResolvedValue([

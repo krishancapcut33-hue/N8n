@@ -8,7 +8,6 @@ import type {
 	SkillListResponse,
 	SkillSaveResponse,
 	SaveSkillDto,
-	SkillScope,
 	SkillSortOption,
 	SkillUserDto,
 	SkillNewNameQueryDto,
@@ -18,9 +17,6 @@ import { ProjectScopeService } from '@n8n/backend-services';
 import { TransactionRunner, UserRepository, type User } from '@n8n/db';
 import { Service } from '@n8n/di';
 import { ForbiddenError, NotFoundError, UserError } from '@n8n/errors';
-import { hasGlobalScope } from '@n8n/permissions';
-
-import { userHasScopes } from '@/permissions.ee/check-access';
 
 import { SkillAgentsProxy } from './skill-agents-proxy.service';
 import { getSkillHash } from './skill-hash';
@@ -31,7 +27,7 @@ import {
 	type SkillTarget,
 	type SkillVisibility,
 } from './skill.repository';
-import { SkillService, toAgentSkill } from './skill.service';
+import { SkillService, skillScopeOf, toAgentSkill } from './skill.service';
 import { SkillsTelemetry, type SkillTelemetrySource } from './skills-telemetry';
 import { AssistantSkillsRollout } from './assistant-skills-rollout';
 
@@ -41,12 +37,6 @@ const LIST_SORTS: Record<SkillSortOption, SkillListSort> = {
 	'updatedAt:asc': { by: 'updatedAt', order: 'ASC' },
 	'updatedAt:desc': { by: 'updatedAt', order: 'DESC' },
 };
-
-function scopeOf(skill: Pick<Skill, 'projectId' | 'agentId'>): SkillScope {
-	if (skill.agentId) return 'agent';
-	if (skill.projectId) return 'project';
-	return 'instance';
-}
 
 /**
  * Skills as the settings page sees them: list, read, create, save and delete. The
@@ -334,7 +324,7 @@ export class SkillsApiService {
 				if (payload.projectId || payload.agentId) {
 					throw new UserError('An instance skill has no project and no agent.');
 				}
-				if (!hasGlobalScope(user, 'skill:create')) {
+				if (!(await this.skillService.canCreate(user, null))) {
 					throw new ForbiddenError('You are not allowed to create skills for the whole instance.');
 				}
 				return { projectId: null, agentId: null };
@@ -364,7 +354,7 @@ export class SkillsApiService {
 	}
 
 	private async assertCanCreateIn(user: User, projectId: string): Promise<void> {
-		if (!(await userHasScopes(user, ['projectSkill:create'], false, { projectId }))) {
+		if (!(await this.skillService.canCreate(user, projectId))) {
 			throw new ForbiddenError('You are not allowed to create skills for this project.');
 		}
 	}
@@ -394,7 +384,7 @@ export class SkillsApiService {
 				id: skill.id,
 				name: summary.name,
 				description: summary.description,
-				scope: scopeOf(skill),
+				scope: skillScopeOf(skill),
 				projectId,
 				projectName: projectId ? (projects.get(projectId)?.name ?? null) : null,
 				projectType: projectId ? (projects.get(projectId)?.type ?? null) : null,

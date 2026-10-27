@@ -14,7 +14,7 @@ import { getSkillHash } from '../skill-hash';
 import type { SkillVersion } from '../skill-version.entity';
 import type { Skill } from '../skill.entity';
 import type { ResolvedSkillRow, SkillRepository } from '../skill.repository';
-import type { SkillService } from '../skill.service';
+import { SkillService } from '../skill.service';
 import { SkillsApiService } from '../skills-api.service';
 import type { SkillsTelemetry } from '../skills-telemetry';
 import type { AssistantSkillsRollout } from '../assistant-skills-rollout';
@@ -99,6 +99,8 @@ describe('SkillsApiService', () => {
 
 	beforeEach(() => {
 		vi.resetAllMocks();
+		// The real rule, on top of the mocked permission checks.
+		skillService.canCreate.mockImplementation(SkillService.prototype.canCreate);
 		rollout.isEnabled.mockResolvedValue(true);
 		txRunner.run.mockImplementation(async (_ctx, fn) => await fn(TX_CTX));
 		visible = Object.keys(NAMES).map((id) => skill(id));
