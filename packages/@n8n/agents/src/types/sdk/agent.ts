@@ -243,7 +243,7 @@ export interface AgentInputBoundary {
 }
 
 export interface ExecutionOptions {
-	/** Expose local and provider tools to the model. Defaults to true. */
+	/** Allow tool calls. Defaults to true. Keep tool definitions for history replay when false. */
 	toolsEnabled?: boolean;
 	/** Request a cooperative pause before the next model step. */
 	shouldPause?: () => Promise<boolean>;
