@@ -14,6 +14,7 @@ import type {
 	SandboxConfig,
 } from '@n8n/instance-ai';
 
+import type { InstanceAiCloudBrowserTaskService } from '../browser/instance-ai-cloud-browser-task.service';
 import type { TypeORMAgentMemory } from '../storage/typeorm-agent-memory';
 
 /** The thread memory reads that the turn setup needs. */
@@ -79,4 +80,9 @@ export interface AssistantTurnRuntime
 	};
 	/** Detached background tasks of the thread that still run. */
 	getRunningBackgroundTasks?(): ManagedBackgroundTask[];
+	/** Starts browser tasks on the cloud browser, when the instance has it. */
+	cloudBrowser?: {
+		isAvailable(): Promise<boolean>;
+		startTask: InstanceAiCloudBrowserTaskService['startTask'];
+	};
 }
