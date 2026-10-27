@@ -309,6 +309,7 @@ vi.mock('../components/AgentChatMessageList.vue', async () => {
 				'retryMessageId',
 				'retryDisabled',
 				'taskTraceRoute',
+				'preparingSummary',
 			],
 			emits: ['send-to-assistant', 'increase-budget', 'retry'],
 			setup() {
@@ -2444,6 +2445,9 @@ describe('AgentChatPanel', () => {
 				await flushPromises();
 				expect(wrapper.find('[data-testid="agent-background-jobs"]').exists()).toBe(false);
 				expect(wrapper.findComponent({ name: 'ChatInputBase' }).props('disabled')).toBe(false);
+				expect(
+					wrapper.getComponent({ name: 'AgentChatMessageList' }).props('preparingSummary'),
+				).toBe(true);
 				await vi.advanceTimersByTimeAsync(10_000);
 				expect(vi.getTimerCount()).toBe(0);
 				backgroundJobsMock.value = [];

@@ -81,6 +81,72 @@ export function isAgentPlanFinished(plan: AgentPlanView): boolean {
 	);
 }
 
+/** Live messages can arrive before the execution ID. Keep one key for their turn. */
+function messageTurnIds(messages: ChatMessage[]): Map<string, string> {
+	const ids = new Map<string, string>();
+	let turn: ChatMessage[] = [];
+	let executionId: string | undefined;
+	const flush = () => {
+		const key = executionId ?? turn[0]?.id;
+		if (key) for (const message of turn) ids.set(message.id, key);
+		turn = [];
+		executionId = undefined;
+	};
+	for (const message of messages) {
+		if (message.role !== 'assistant' || message.stopReport) {
+			flush();
+			continue;
+		}
+		if (executionId && message.executionId && executionId !== message.executionId) flush();
+		turn.push(message);
+		executionId ??= message.executionId;
+	}
+	flush();
+	return ids;
+}
+
+const backgroundJobReceiptSchema = z.object({
+	jobId: z.string(),
+	status: z.enum(['started', 'running_in_background']),
+});
+
+function taskSummaryTurnIds(messages: ChatMessage[], turnIds: Map<string, string>): Set<string> {
+	const executions = new Set<string>();
+	const continued = new Set<string>();
+	for (const message of messages) {
+		const key = turnIds.get(message.id);
+		if (!key) continue;
+		if (message.backgroundJobSignal?.isFinal) executions.add(key);
+		for (const call of message.toolCalls ?? []) {
+			if (call.state !== TOOL_CALL_STATE.DONE || call.canceled) continue;
+			if (backgroundJobReceiptSchema.safeParse(call.output).success) continued.add(key);
+			if (!planToolNames.has(call.tool)) continue;
+			const plan = planSchema.safeParse(call.output);
+			if (!plan.success) continue;
+			if (!isAgentPlanFinished(plan.data)) executions.delete(key);
+			else if (['update_plan', 'close_plan'].includes(call.tool)) executions.add(key);
+		}
+	}
+	// A result turn can start the next batch instead of summarizing the work.
+	for (const key of continued) executions.delete(key);
+	return executions;
+}
+
+/** Put one summary at the end of each task result turn, including saved turns. */
+export function getTaskSummaryGroupIds(
+	messages: ChatMessage[],
+	groups: DisplayGroup[],
+): Set<string> {
+	const turnIds = messageTurnIds(messages);
+	const executions = taskSummaryTurnIds(messages, turnIds);
+	const lastGroups = new Map<string, string>();
+	for (const group of groups) {
+		const key = turnIds.get(group.id);
+		if (key && executions.has(key)) lastGroups.set(key, group.id);
+	}
+	return new Set(lastGroups.values());
+}
+
 const comparisonDocumentSchema = planSchema.shape.document.passthrough().extend({
 	items: z.array(
 		z.discriminatedUnion('kind', [
@@ -216,7 +282,16 @@ export function buildAgentPlanDisplayGroups(messages: ChatMessage[]): DisplayGro
 		}
 	}
 
-	const groups = buildDisplayGroups(messages);
+	const turnIds = messageTurnIds(messages);
+	const summaryTurns = taskSummaryTurnIds(messages, turnIds);
+	const groups = buildDisplayGroups(
+		messages.map((message) =>
+			message.backgroundJobSignal?.isFinal && summaryTurns.has(turnIds.get(message.id) ?? '')
+				? { ...message, backgroundJobSignal: undefined }
+				: message,
+		),
+	);
+	const summaryGroupIds = getTaskSummaryGroupIds(messages, groups);
 	return groups.flatMap((group): DisplayGroup[] => {
 		if (group.kind === DISPLAY_GROUP_KIND.BACKGROUND_JOB_SIGNAL) return [group];
 		if (group.kind === DISPLAY_GROUP_KIND.MESSAGE) {
@@ -233,6 +308,7 @@ export function buildAgentPlanDisplayGroups(messages: ChatMessage[]): DisplayGro
 
 		const toolCalls = group.toolCalls.filter((call) => !hiddenCalls.has(call.toolCallId));
 		if (
+			!summaryGroupIds.has(group.id) &&
 			!toolCalls.length &&
 			!group.active &&
 			!group.finalMessage?.content.trim() &&

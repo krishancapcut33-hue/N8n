@@ -48,12 +48,13 @@ import AgentChatMessageAttachments from './AgentChatMessageAttachments.vue';
 import AgentChatToolSteps from './AgentChatToolSteps.vue';
 import AgentChatRetryError from './AgentChatRetryError.vue';
 import AgentMarkdownChunk from './AgentMarkdownChunk.vue';
+import AgentChatTaskSummary from './AgentChatTaskSummary.vue';
 import AgentTypingIndicator from './AgentTypingIndicator.vue';
 import AgentBudgetNoticeCard from './AgentBudgetNoticeCard.vue';
 import InteractiveCard from './interactive/InteractiveCard.vue';
 import type { AgentFixWithAssistantFailure, AgentSendToAssistantEvent } from '../types';
 import { looksLikeAgentChangeRequest } from '../utils/agent-change-request';
-import { buildAgentPlanDisplayGroups } from '../utils/agent-plan';
+import { buildAgentPlanDisplayGroups, getTaskSummaryGroupIds } from '../utils/agent-plan';
 import { isRetryableChatError } from '../utils/errors';
 import { isSameLocalDay, useChatDividerTimestamp } from '../utils/relative-time';
 import {
@@ -76,6 +77,7 @@ const props = defineProps<{
 	retryMessageId?: string;
 	retryDisabled?: boolean;
 	taskTraceRoute?: RouteLocationRaw;
+	preparingSummary?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -243,6 +245,13 @@ const visibleMessages = computed(() => {
 });
 
 const displayGroups = computed(() => buildAgentPlanDisplayGroups(visibleMessages.value));
+const taskSummaryGroupIds = computed(() =>
+	getTaskSummaryGroupIds(visibleMessages.value, displayGroups.value),
+);
+const tailSummaryId = computed(() => {
+	const last = displayGroups.value.at(-1);
+	return last && taskSummaryGroupIds.value.has(last.id) ? last.id : undefined;
+});
 
 interface GroupToolCalls {
 	/** Calls that render as default tool steps. */
@@ -621,6 +630,7 @@ watch(
 );
 
 watch(() => props.messagingState, autoScrollIfSticky, { flush: 'post' });
+watch(() => props.preparingSummary, autoScrollIfSticky, { flush: 'post' });
 useResizeObserver(statusRef, autoScrollIfSticky);
 
 // Content within the last message grew (streaming text, tool calls, thinking,
@@ -706,8 +716,20 @@ watch(
 							@submit="onInteractiveSubmit(payload, $event)"
 						/>
 					</div>
+					<AgentChatTaskSummary
+						v-if="taskSummaryGroupIds.has(group.id)"
+						:content="group.finalMessage?.content"
+						:preparing="group.active || (!!preparingSummary && group.id === tailSummaryId)"
+						:trace-route="taskTraceRoute"
+						:retryable-error="isRetryableChatError(group.finalMessage)"
+						:retry-message-id="
+							group.finalMessage?.id === retryErrorMessageId ? retryMessageId : undefined
+						"
+						:retry-disabled="retryDisabled"
+						@retry="emit('retry', $event)"
+					/>
 					<AgentChatRetryError
-						v-if="group.finalMessage && isRetryableChatError(group.finalMessage)"
+						v-else-if="group.finalMessage && isRetryableChatError(group.finalMessage)"
 						:message="group.finalMessage.content"
 						:retry-message-id="
 							group.finalMessage.id === retryErrorMessageId ? retryMessageId : undefined
@@ -779,6 +801,7 @@ watch(
 					<AgentTypingIndicator
 						v-if="
 							group.id === streamingGroupId &&
+							!taskSummaryGroupIds.has(group.id) &&
 							!group.finalMessage?.content &&
 							!group.toolCalls.length &&
 							!group.thinkingSegments.length
@@ -843,8 +866,23 @@ watch(
 					>
 						{{ group.message.author.name }}
 					</N8nText>
+					<AgentChatTaskSummary
+						v-if="taskSummaryGroupIds.has(group.id)"
+						:content="group.message.content"
+						:preparing="
+							group.message.status === CHAT_MESSAGE_STATUS.STREAMING ||
+							(!!preparingSummary && group.id === tailSummaryId)
+						"
+						:trace-route="taskTraceRoute"
+						:retryable-error="isRetryableChatError(group.message)"
+						:retry-message-id="
+							group.message.id === retryErrorMessageId ? retryMessageId : undefined
+						"
+						:retry-disabled="retryDisabled"
+						@retry="emit('retry', $event)"
+					/>
 					<div
-						v-if="group.message.role === CHAT_MESSAGE_ROLE.USER && group.message.content"
+						v-else-if="group.message.role === CHAT_MESSAGE_ROLE.USER && group.message.content"
 						:class="[$style.chatMessage, $style.chatMessageUser]"
 					>
 						{{ group.message.content }}
@@ -998,6 +1036,7 @@ watch(
 					<AgentTypingIndicator
 						v-if="
 							group.message.role === CHAT_MESSAGE_ROLE.ASSISTANT &&
+							!taskSummaryGroupIds.has(group.id) &&
 							group.message.status === CHAT_MESSAGE_STATUS.STREAMING &&
 							!group.message.content &&
 							!group.message.toolCalls?.length &&
@@ -1009,7 +1048,13 @@ watch(
 			</div>
 		</template>
 
-		<div v-if="messagingState === 'waitingFirstChunk'" :class="$style.message">
+		<div v-if="preparingSummary && !tailSummaryId" :class="$style.message">
+			<AgentChatTaskSummary preparing :trace-route="taskTraceRoute" />
+		</div>
+		<div
+			v-else-if="messagingState === 'waitingFirstChunk' && !tailSummaryId"
+			:class="$style.message"
+		>
 			<div :class="$style.content">
 				<AgentTypingIndicator :class="$style.typingIndicator" />
 			</div>

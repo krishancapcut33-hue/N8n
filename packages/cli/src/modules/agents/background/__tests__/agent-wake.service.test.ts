@@ -7,12 +7,14 @@ import { createDeferredPromise } from '@n8n/utils/promise/deferred-promise';
 import type { InstanceSettings } from 'n8n-core';
 import { mock } from 'vitest-mock-extended';
 
-import { AgentExecutionThreadRepository } from '@/modules/agents/repositories/agent-execution-thread.repository';
+import type { AgentExecutionThreadRepository } from '@/modules/agents/repositories/agent-execution-thread.repository';
 import { userHasScopes } from '@/permissions.ee/check-access';
 import type { Publisher } from '@/scaling/pubsub/publisher.service';
 
 import type { AgentExecutionOrchestratorService } from '../../agent-execution-orchestrator.service';
 import { AgentConversationStateService } from '../../agent-conversation-state.service';
+import type { AgentPlanService, AgentPlanSnapshot } from '../../agent-plan.service';
+import type { AgentPlanTask } from '../../plans/agent-plan.schema';
 import { hashAgentSandboxPrincipal } from '../../agent-sandbox-principal';
 import type { AgentBackgroundJob } from '../../entities/agent-background-job.entity';
 import type { ChatIntegrationRegistry } from '../../integrations/agent-chat-integration';
@@ -70,6 +72,8 @@ function makeJob(overrides: Partial<AgentBackgroundJob> = {}): AgentBackgroundJo
 function setup(options: { worker?: boolean; enabled?: boolean } = {}) {
 	const jobRepository = mock<AgentBackgroundJobRepository>();
 	const backgroundJobService = mock<AgentBackgroundJobService>();
+	const planService = mock<AgentPlanService>();
+	planService.findActivePlan.mockResolvedValue(null);
 	backgroundJobService.markMailConsumed.mockImplementation(
 		async (...args) => await jobRepository.markMailConsumed(...args),
 	);
@@ -116,12 +120,14 @@ function setup(options: { worker?: boolean; enabled?: boolean } = {}) {
 		agentsConfig,
 		logger,
 		backgroundJobService,
+		planService,
 	);
 
 	return {
 		cancellations,
 		service,
 		backgroundJobService,
+		planService,
 		jobRepository,
 		executionRepository,
 		agentRepository,
@@ -136,6 +142,79 @@ function setup(options: { worker?: boolean; enabled?: boolean } = {}) {
 }
 
 describe('AgentWakeService', () => {
+	it.each(['pending', 'in_progress', 'paused', 'done', 'failed', 'cancelled'] as const)(
+		'checks the %s plan task before marking the last job result as final',
+		async (status) => {
+			const { service, planService, orchestrator } = setup();
+			planService.findActivePlan.mockResolvedValue(
+				mock<AgentPlanSnapshot>({
+					data: {
+						title: 'Research',
+						description: 'Research, then prepare the report',
+						items: [
+							mock<AgentPlanTask>({ kind: 'task', status: 'done', jobId: 'job-1' }),
+							mock<AgentPlanTask>({ kind: 'task', status }),
+						],
+					},
+				}),
+			);
+			await service.attemptWake('thread-1');
+			expect(planService.findActivePlan).toHaveBeenCalledWith('thread-1', {});
+			expect(
+				orchestrator.executeForWake.mock.calls[0][0].backgroundJobSignal.isFinal === true,
+			).toBe(['done', 'failed', 'cancelled'].includes(status));
+		},
+	);
+
+	it('does not mark an empty plan as finished when the last job completes', async () => {
+		const { service, planService, orchestrator } = setup();
+		planService.findActivePlan.mockResolvedValue(
+			mock<AgentPlanSnapshot>({
+				data: { title: 'Research', description: 'Plan the work', items: [] },
+			}),
+		);
+		await service.attemptWake('thread-1');
+		expect(orchestrator.executeForWake.mock.calls[0][0].backgroundJobSignal.isFinal).not.toBe(true);
+	});
+
+	it.each(['running', 'suspended', 'paused', 'completed', 'failed', 'cancelled'] as const)(
+		'identifies the final result batch when the other job is %s',
+		async (status) => {
+			const { service, jobRepository, orchestrator } = setup();
+			jobRepository.findByParentThread.mockResolvedValue([
+				makeJob(),
+				makeJob({ id: 'other-job', status, notifiedAt: new Date() }),
+				makeJob({ id: 'other-author', status: 'running', parentResourceId: 'draft-chat:user-2' }),
+			]);
+			await service.attemptWake('thread-1');
+			expect(
+				orchestrator.executeForWake.mock.calls[0][0].backgroundJobSignal.isFinal === true,
+			).toBe(['completed', 'failed', 'cancelled'].includes(status));
+		},
+	);
+
+	it.each(['completed', 'failed', 'cancelled'] as const)(
+		'waits for a %s sibling result that arrived after the batch was selected',
+		async (status) => {
+			const { service, jobRepository, orchestrator } = setup();
+			const first = makeJob();
+			const sibling = makeJob({ id: 'sibling', status });
+			jobRepository.findWakeableUnconsumed.mockResolvedValueOnce([first]);
+			jobRepository.findByParentThread.mockResolvedValue([first, sibling]);
+			await service.attemptWake('thread-1');
+			expect(orchestrator.executeForWake.mock.calls[0][0].backgroundJobSignal.isFinal).not.toBe(
+				true,
+			);
+			jobRepository.findWakeableUnconsumed.mockResolvedValueOnce([sibling]);
+			jobRepository.findByParentThread.mockResolvedValue([
+				{ ...first, notifiedAt: new Date() },
+				sibling,
+			]);
+			await service.attemptWake('thread-1');
+			expect(orchestrator.executeForWake.mock.calls[1][0].backgroundJobSignal.isFinal).toBe(true);
+		},
+	);
+
 	it('leaves a queued stop report to the message queue', async () => {
 		const { service, cancellations, jobRepository, orchestrator } = setup();
 		jobRepository.findWakeableUnconsumed.mockResolvedValue([
@@ -248,6 +327,7 @@ describe('AgentWakeService', () => {
 		expect(orchestrator.executeForWake).toHaveBeenCalledWith(
 			expect.objectContaining({
 				backgroundJobSignal: {
+					isFinal: true,
 					tasks: [
 						{ id: 'job-1', title: 'Research', kind: 'subagent', status: 'completed' },
 						{ id: 'job-2', title: 'Research', kind: 'workflow', status: 'failed' },

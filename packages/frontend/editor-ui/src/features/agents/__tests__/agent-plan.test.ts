@@ -1,8 +1,189 @@
 import { describe, expect, it } from 'vitest';
 import { convertDbMessages } from '@/features/ai/shared/agentsChat/messageMappers';
-import { buildAgentPlanDisplayGroups } from '../utils/agent-plan';
+import {
+	buildAgentPlanDisplayGroups,
+	getTaskSummaryGroupIds,
+	isAgentPlanFinished,
+} from '../utils/agent-plan';
 import type { ChatMessage, ToolCall } from '@/features/ai/shared/agentsChat/types';
 import { planMessage, planTask, planView } from './fixtures/agent-plan';
+
+describe('task summaries', () => {
+	it.each([
+		['delegate_subagent', { jobId: 'next-job', status: 'started' }],
+		['workflow_research', { jobId: 'next-job', status: 'running_in_background' }],
+	] as const)('keeps a result turn partial when %s starts more work', (tool, output) => {
+		const messages: ChatMessage[] = [
+			{
+				id: 'results',
+				executionId: 'wake',
+				role: 'assistant',
+				content: '',
+				backgroundJobSignal: {
+					isFinal: true,
+					tasks: [{ id: 'job', title: 'Research', kind: 'subagent', status: 'completed' }],
+				},
+			},
+			{
+				id: 'delegate',
+				executionId: 'wake',
+				role: 'assistant',
+				content: '',
+				toolCalls: [{ tool, toolCallId: 'next', state: 'done', output }],
+			},
+			{ id: 'reply', executionId: 'wake', role: 'assistant', content: 'Started the next task.' },
+		];
+		const groups = buildAgentPlanDisplayGroups(messages);
+		expect(getTaskSummaryGroupIds(messages, groups).size).toBe(0);
+		expect(groups.filter((group) => group.kind === 'backgroundJobSignal')).toHaveLength(1);
+	});
+
+	it.each(['create_plan', 'read_plan', 'update_plan'])(
+		'%s can show that more work remains',
+		(tool) => {
+			const message = {
+				...planMessage(planView(), { tool }),
+				backgroundJobSignal: {
+					isFinal: true,
+					tasks: [
+						{
+							id: 'job',
+							title: 'Research',
+							kind: 'subagent' as const,
+							status: 'completed' as const,
+						},
+					],
+				},
+			};
+			const groups = buildAgentPlanDisplayGroups([message]);
+			expect(getTaskSummaryGroupIds([message], groups).size).toBe(0);
+			expect(groups.filter((group) => group.kind === 'backgroundJobSignal')).toHaveLength(1);
+		},
+	);
+
+	it('keeps one summary at the end of a completed plan turn', () => {
+		const completed = {
+			...planMessage(planView({ document: { title: 'Research', items: [planTask(1, 'done')] } }), {
+				tool: 'update_plan',
+			}),
+			executionId: 'complete',
+			status: 'streaming' as const,
+		};
+		const reply: ChatMessage = {
+			id: 'summary',
+			executionId: 'complete',
+			role: 'assistant',
+			content: 'Found 12 threads.',
+			status: 'success',
+		};
+		const messages = [completed, reply, { id: 'later', role: 'user' as const, content: 'Thanks' }];
+		const groups = buildAgentPlanDisplayGroups(messages);
+		expect([...getTaskSummaryGroupIds(messages, groups)]).toEqual([completed.id]);
+		expect(groups[0]).toMatchObject({ kind: 'toolRun', finalMessage: reply });
+	});
+
+	it('does not label unfinished or paused plans as final summaries', () => {
+		for (const status of ['pending', 'in_progress', 'paused'] as const) {
+			const messages = [
+				planMessage(planView({ document: { title: 'Research', items: [planTask(1, status)] } }), {
+					tool: 'update_plan',
+				}),
+			];
+			expect(getTaskSummaryGroupIds(messages, buildAgentPlanDisplayGroups(messages)).size).toBe(0);
+		}
+		expect(isAgentPlanFinished(planView({ document: { title: 'Empty', items: [] } }))).toBe(false);
+	});
+
+	it.each(['done', 'failed', 'cancelled'] as const)(
+		'summarizes a %s task but keeps Stop reports separate',
+		(status) => {
+			const message = planMessage(
+				planView({ document: { title: 'Research', items: [planTask(1, status)] } }),
+				{ tool: 'update_plan' },
+			);
+			expect([
+				...getTaskSummaryGroupIds([message], buildAgentPlanDisplayGroups([message])),
+			]).toEqual([message.id]);
+			const stopped = { ...message, stopReport: true };
+			expect(getTaskSummaryGroupIds([stopped], buildAgentPlanDisplayGroups([stopped])).size).toBe(
+				0,
+			);
+		},
+	);
+
+	it.each([undefined, 'parent'])(
+		'finds a folded completion with execution ID %s',
+		(executionId) => {
+			const initial = planMessage(
+				planView({ document: { title: 'Research', items: [planTask(1)] } }),
+			);
+			const completed = {
+				...planMessage(
+					planView({ revision: 2, document: { title: 'Research', items: [planTask(1, 'done')] } }),
+					{ tool: 'update_plan' },
+				),
+				executionId,
+			};
+			const messages = [initial, completed];
+			expect([...getTaskSummaryGroupIds(messages, buildAgentPlanDisplayGroups(messages))]).toEqual([
+				initial.id,
+			]);
+		},
+	);
+
+	it('hides empty intermediate runs but keeps the final summary run', () => {
+		const initial = planMessage(
+			planView({ document: { title: 'Research', items: [planTask(1)] } }),
+		);
+		const progress = (revision: number, status: 'in_progress' | 'done') => ({
+			...planMessage(
+				planView({ revision, document: { title: 'Research', items: [planTask(1, status)] } }),
+				{ tool: 'update_plan' },
+			),
+			executionId: 'parent',
+		});
+		const hidden = progress(2, 'in_progress');
+		const final = progress(3, 'done');
+		const messages: ChatMessage[] = [
+			initial,
+			{ id: 'user', role: 'user', content: 'Start' },
+			hidden,
+			{ id: 'empty', role: 'assistant', content: '', executionId: 'parent' },
+			final,
+		];
+		const groups = buildAgentPlanDisplayGroups(messages);
+		expect(groups.map((group) => group.id)).toEqual([initial.id, 'user', final.id]);
+		expect([...getTaskSummaryGroupIds(messages, groups)]).toEqual([final.id]);
+	});
+
+	it('keeps final result turns separate from partial result cards', () => {
+		const signal = {
+			tasks: [
+				{ id: 'job', title: 'Research', kind: 'subagent' as const, status: 'completed' as const },
+			],
+		};
+		const messages: ChatMessage[] = [
+			{
+				id: 'partial',
+				executionId: 'partial',
+				role: 'assistant',
+				content: 'Some results.',
+				backgroundJobSignal: signal,
+			},
+			{
+				id: 'final',
+				executionId: 'final',
+				role: 'assistant',
+				content: '',
+				status: 'streaming',
+				backgroundJobSignal: { ...signal, isFinal: true },
+			},
+		];
+		const groups = buildAgentPlanDisplayGroups(messages);
+		expect(groups.filter((group) => group.kind === 'backgroundJobSignal')).toHaveLength(1);
+		expect([...getTaskSummaryGroupIds(messages, groups)]).toEqual(['final']);
+	});
+});
 
 describe('buildAgentPlanDisplayGroups', () => {
 	const initialCallId = expect.stringMatching(/^plan-call-\d+$/);
