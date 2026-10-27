@@ -21,6 +21,7 @@ import { CredentialTypes } from '@/credential-types';
 import { CredentialsService } from '@/credentials/credentials.service';
 import { BadRequestError, ConflictError, NotFoundError } from '@n8n/errors';
 import { createMcpAuthFetch } from '@/modules/mcp-registry/mcp-auth-fetch';
+import { findUsableMcpCredential } from '@/modules/mcp-registry/mcp-credential-access';
 import {
 	isSupportedMcpRegistryCredentialType,
 	prepareMcpRegistryConnection,
@@ -140,11 +141,7 @@ export class InstanceAiMcpRegistryService {
 			);
 		}
 
-		const credential = await this.credentialsFinderService.findCredentialForUser(
-			input.credentialId,
-			user,
-			['credential:read'],
-		);
+		const credential = await this.findUsableCredential(input.credentialId, user);
 		if (!credential) {
 			throw new NotFoundError('Credential not found or not accessible');
 		}
@@ -487,11 +484,7 @@ export class InstanceAiMcpRegistryService {
 		credentialId: string,
 		user: User,
 	): Promise<{ credential: CredentialsEntity; data: ICredentialDataDecryptedObject } | null> {
-		const credential = await this.credentialsFinderService.findCredentialForUser(
-			credentialId,
-			user,
-			['credential:read'],
-		);
+		const credential = await this.findUsableCredential(credentialId, user);
 		if (!credential) {
 			return null;
 		}
@@ -510,17 +503,20 @@ export class InstanceAiMcpRegistryService {
 		newCredentialId: string,
 		server: McpRegistryServer,
 	) {
-		const newCredential = await this.credentialsFinderService.findCredentialForUser(
-			newCredentialId,
-			user,
-			['credential:read'],
-		);
+		const newCredential = await this.findUsableCredential(newCredentialId, user);
 		if (!newCredential) {
 			throw new NotFoundError('Credential not found or not accessible');
 		}
 
 		this.assertCredentialAllowed(server, newCredential.type);
 		connection.credentialId = newCredentialId;
+	}
+
+	private async findUsableCredential(
+		credentialId: string,
+		user: User,
+	): Promise<CredentialsEntity | null> {
+		return await findUsableMcpCredential(this.credentialsFinderService, credentialId, user);
 	}
 
 	private assertCredentialAllowed(server: McpRegistryServer, credentialType: string): void {
